@@ -2,7 +2,7 @@
 """
 TAP AI Router
 
-LLM-based routing (SQL vs RAG)
+LLM-based routing (SQL vs RAG vs Direct Chat)
 DynamicConfig-compatible user & content context
 Robust SQL failure detection (even when SQL "answers")
 Automatic fallback with interim message
@@ -11,6 +11,8 @@ Rich metadata
 """
 
 import json
+import time
+import hashlib
 import uuid
 from typing import Dict, Any, List, Optional
 
@@ -20,18 +22,68 @@ from langchain_openai import ChatOpenAI
 from tap_ai.infra.config import get_config
 from tap_ai.services.sql_answerer import answer_from_sql
 from tap_ai.services.rag_answerer import answer_from_pinecone
+from tap_ai.services.direct_answerer import answer_direct
 
 
 # ======================================================
 # LLM INITIALIZATION
 # ======================================================
 
-def _llm() -> ChatOpenAI:  
+def _llm(
+    model: Optional[str] = None,
+    temperature: float = 0.0,
+    max_tokens: int = 1500,
+) -> ChatOpenAI:
     from tap_ai.infra.llm_client import LLMClient  
     return LLMClient.get_client(  
-        model=get_config("primary_llm_model") or "gpt-4o-mini",  
-        temperature=0.0  
+        model=model or (get_config("primary_llm_model") or "gpt-4o-mini"),
+        temperature=temperature,
+        max_tokens=max_tokens,
     )  
+
+
+def llm_invoke_cached(
+    messages: List,
+    model: str = "gpt-4o-mini",
+    temperature: float = 0.0,
+    cache_ttl: int = 3600,
+    max_tokens: int = 700,
+) -> str:
+    """Invoke LLM with Redis caching; falls back to live invoke on cache issues."""
+    try:
+        payload = {
+            "messages": messages,
+            "model": model,
+            "temperature": temperature,
+        }
+        cache_key = "llm_cache:" + hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+
+        cached = frappe.cache().get(cache_key)
+        if cached:
+            if isinstance(cached, bytes):
+                cached = cached.decode("utf-8", errors="ignore")
+            return str(cached)
+    except Exception:
+        cache_key = None
+
+    llm = _llm(model=model, temperature=temperature, max_tokens=max_tokens)
+    start = time.time()
+    resp = llm.invoke(messages)
+    content = getattr(resp, "content", "")
+    if content is None:
+        content = ""
+    content = str(content).strip()
+
+    try:
+        if cache_key and content:
+            frappe.cache().set(cache_key, content, ex=cache_ttl)
+    except Exception:
+        pass
+
+    print(f"> LLM invoke ({model}) took {int((time.time() - start) * 1000)}ms")
+    return content
 
 
 # ======================================================
@@ -43,18 +95,22 @@ ROUTER_PROMPT = """You are a query routing expert.
 Choose ONE tool:
 1. text_to_sql – factual, structured data queries (list, count, show, filter)
 2. vector_search – conceptual, explanatory, summarization queries
+3. direct_llm – greetings, small talk, wellbeing/motivation guidance, conversational support
+
+Routing hints:
+- Use text_to_sql for explicit data lookup from platform tables
+- Use vector_search for semantic/content retrieval and summarization from indexed knowledge
+- Use direct_llm for social conversation and coaching-style guidance that does not require data retrieval
 
 Return ONLY JSON:
 {
-  "tool": "text_to_sql" or "vector_search",
+    "tool": "text_to_sql" or "vector_search" or "direct_llm",
   "reason": "short explanation (<= 20 words)"
 }
 """
 
 
 def choose_tool(query: str, user_context: Optional[str] = None) -> str:
-    llm = _llm()
-
     prompt = f"USER QUESTION:\n{query}"
     if user_context:
         prompt = f"USER CONTEXT:\n{user_context}\n\n{prompt}"
@@ -62,13 +118,16 @@ def choose_tool(query: str, user_context: Optional[str] = None) -> str:
     prompt += "\n\nWhich tool should be used?"
 
     try:
-        resp = llm.invoke([("system", ROUTER_PROMPT), ("user", prompt)])
-        content = getattr(resp, "content", "").strip()
+        content = llm_invoke_cached(
+            [("system", ROUTER_PROMPT), ("user", prompt)],
+            model=get_config("primary_llm_model") or "gpt-4o-mini",
+            temperature=0.0,
+        )
         content = content.replace("```json", "").replace("```", "").strip()
         data = json.loads(content)
         tool = data.get("tool")
         print(f"> Router Reason: {data.get('reason')}")
-        if tool in ("text_to_sql", "vector_search"):
+        if tool in ("text_to_sql", "vector_search", "direct_llm"):
             return tool
     except Exception as e:
         frappe.log_error(f"Router failed: {e}")
@@ -139,7 +198,8 @@ def process_query(
     user_profile: Optional[Dict[str, Any]] = None,
     content_details: Optional[Dict[str, Any]] = None,
     chat_history: Optional[List[Dict[str, str]]] = None,
-    context: Optional[Dict[str, Any]] = None
+    context: Optional[Dict[str, Any]] = None,
+    voice_mode: bool = False,
 ) -> dict:
 
     chat_history = chat_history or []
@@ -189,6 +249,13 @@ def process_query(
                 chat_history=chat_history
             )
             result["interim_message"] = interim
+
+    elif primary_tool == "direct_llm":
+        result = answer_direct(
+            query=query,
+            user_profile=user_profile,
+            chat_history=chat_history,
+        )
 
     else:
         primary_tool = "vector_search"

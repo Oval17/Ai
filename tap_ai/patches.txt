@@ -1,0 +1,1 @@
+tap_ai.patches.v1_0_0.seed_tap_response_knowledge

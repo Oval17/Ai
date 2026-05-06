@@ -121,11 +121,22 @@ def choose_tool(query: str, user_context: Optional[str] = None) -> str:
     prompt += "\n\nWhich tool should be used?"
 
     try:
+        # Debug: log a short snippet of the prompt so we can reproduce routing decisions
+        try:
+            print(f"> Router prompt snippet: {prompt[:400]!r}")
+        except Exception:
+            pass
+
         content = llm_invoke_cached(
             [("system", ROUTER_PROMPT), ("user", prompt)],
             model=get_config("primary_llm_model") or "gpt-4o-mini",
             temperature=0.0,
         )
+        # Debug: emit the raw LLM output so we can see why a tool was chosen in logs
+        try:
+            print(f"> Router LLM output: {str(content)[:1000]!r}")
+        except Exception:
+            pass
         content = content.replace("```json", "").replace("```", "").strip()
         data = json.loads(content)
         tool = data.get("tool")

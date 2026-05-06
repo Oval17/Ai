@@ -258,6 +258,14 @@ def lookup_direct_response(
 	start = time.perf_counter()
 	entries = get_direct_response_entries()
 	match = select_best_response(query, entries)
+	# Debug: log match info so we can see why a query matched or missed
+	try:
+		if match:
+			print(f"> KB match found: title={match.get('title')!r} score={match.get('match_score')!r} matched_query={match.get('matched_query')!r}")
+		else:
+			print("> KB match: none (no entry passed threshold)")
+	except Exception:
+		pass
 	if not match:
 		return None
 

@@ -9,7 +9,6 @@ import frappe
 from langchain_openai import ChatOpenAI
 
 from tap_ai.infra.config import get_config
-from tap_ai.services.direct_response_bank import lookup_direct_response
 
 
 def _llm(model: str = "gpt-4o-mini", temperature: float = 0.4) -> ChatOpenAI:
@@ -49,14 +48,6 @@ def answer_direct(
 ) -> Dict[str, Any]:
     """Generate a direct conversational response without SQL or RAG retrieval."""
     start = time.perf_counter()
-
-    knowledge_bank_hit = lookup_direct_response(
-        query=query,
-        user_profile=user_profile,
-        chat_history=chat_history,
-    )
-    if knowledge_bank_hit:
-        return knowledge_bank_hit
 
     llm = _llm(model=get_config("primary_llm_model") or "gpt-4o-mini")
     chat_history = chat_history or []

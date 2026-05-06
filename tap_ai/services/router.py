@@ -35,12 +35,12 @@ def _llm(
     temperature: float = 0.0,
     max_tokens: int = 1500,
 ) -> ChatOpenAI:
-    from tap_ai.infra.llm_client import LLMClient  
-    return LLMClient.get_client(  
+    from tap_ai.infra.llm_client import LLMClient
+    return LLMClient.get_client(
         model=model or (get_config("primary_llm_model") or "gpt-4o-mini"),
         temperature=temperature,
         max_tokens=max_tokens,
-    )  
+    )
 
 
 def llm_invoke_cached(
@@ -94,19 +94,21 @@ def llm_invoke_cached(
 ROUTER_PROMPT = """You are a query routing expert.
 
 Choose ONE tool:
-1. text_to_sql – factual, structured data queries (list, count, show, filter)
-2. vector_search – conceptual, explanatory, summarization queries
-3. direct_llm – greetings, small talk, wellbeing/motivation guidance, conversational support
+1. knowledge_bank - curated TAP response phrases and support snippets from the TAP Response Knowledge doctype
+2. text_to_sql - factual, structured data queries (list, count, show, filter)
+3. vector_search - conceptual, explanatory, summarization queries
+4. direct_llm - open-ended supportive conversation when no knowledge-bank entry fits
 
 Routing hints:
-- Use text_to_sql for explicit data lookup from platform tables
-- Use vector_search for semantic/content retrieval and summarization from indexed knowledge
-- Use direct_llm for social conversation and coaching-style guidance that does not require data retrieval
+- Use knowledge_bank for short conversational intents that match curated categories such as greetings, sign-offs, identity questions, TAP program explanations, simple acknowledgements, gibberish/emoji spam, request phrases, help/stuck/problem replies, submission help, and motivational/support replies.
+- Use text_to_sql for explicit data lookup from platform tables.
+- Use vector_search for semantic/content retrieval and summarization from indexed knowledge.
+- Use direct_llm for social conversation and coaching-style guidance that does not require a curated knowledge-bank entry.
 
 Return ONLY JSON:
 {
-    "tool": "text_to_sql" or "vector_search" or "direct_llm",
-  "reason": "short explanation (<= 20 words)"
+    "tool": "knowledge_bank" or "text_to_sql" or "vector_search" or "direct_llm",
+    "reason": "short explanation (<= 20 words)"
 }
 """
 
@@ -128,17 +130,17 @@ def choose_tool(query: str, user_context: Optional[str] = None) -> str:
         data = json.loads(content)
         tool = data.get("tool")
         print(f"> Router Reason: {data.get('reason')}")
-        if tool in ("text_to_sql", "vector_search", "direct_llm"):
+        if tool in ("knowledge_bank", "text_to_sql", "vector_search", "direct_llm"):
             return tool
     except Exception as e:
         frappe.log_error(f"Router failed: {e}")
 
-    print("> Router fallback → vector_search")
+    print("> Router fallback -> vector_search")
     return "vector_search"
 
 
 # ======================================================
-# FAILURE DETECTION 
+# FAILURE DETECTION
 # ======================================================
 
 def _is_failure(res: dict) -> bool:
@@ -205,14 +207,6 @@ def process_query(
 
     chat_history = chat_history or []
 
-    direct_bank_hit = lookup_direct_response(
-        query=query,
-        user_profile=user_profile,
-        chat_history=chat_history,
-    )
-    if direct_bank_hit:
-        return _with_meta(direct_bank_hit, query, "direct_llm", False)
-
     # -------- Build user context string (for routing) --------
     user_context = None
     if user_profile:
@@ -239,6 +233,27 @@ def process_query(
     result = {}
 
     # -------- Execute --------
+    if primary_tool == "knowledge_bank":
+        result = lookup_direct_response(
+            query=query,
+            user_profile=user_profile,
+            chat_history=chat_history,
+        )
+
+        if result:
+            return _with_meta(result, query, "knowledge_bank", False)
+
+        print("> Knowledge bank miss or low-confidence hit -> falling back to direct LLM")
+        fallback_used = True
+        primary_tool = "direct_llm"
+        result = answer_direct(
+            query=query,
+            user_profile=user_profile,
+            chat_history=chat_history,
+        )
+
+        return _with_meta(result, query, primary_tool, fallback_used)
+
     if primary_tool == "text_to_sql":
         result = answer_from_sql(
             query,
@@ -248,7 +263,7 @@ def process_query(
         )
 
         if _is_failure(result):
-            print("> SQL failure detected → Falling back to RAG")
+            print("> SQL failure detected â†’ Falling back to RAG")
             fallback_used = True
             interim = "Searching, please wait a few more seconds..."
             result = answer_from_pinecone(
@@ -481,7 +496,7 @@ def cli(q: str, user_id: str = "default_user"):
     """
 
     print("\n" + "=" * 80)
-    print("TAP AI ROUTER – CLI")
+    print("TAP AI ROUTER â€“ CLI")
     print("=" * 80)
 
     history = _get_history_from_cache(user_id)

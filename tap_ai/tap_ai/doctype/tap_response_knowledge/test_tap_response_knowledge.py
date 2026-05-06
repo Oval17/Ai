@@ -16,7 +16,6 @@ class TestTapResponseKnowledge(FrappeTestCase):
 				"alternate_queries": "Hi\nHii\nHelo\n👋",
 				"response": "Hello!",
 				"match_type": "Fuzzy",
-				"priority": 10,
 				"is_active": 1,
 			},
 			{
@@ -27,7 +26,6 @@ class TestTapResponseKnowledge(FrappeTestCase):
 				"alternate_queries": "Goodbye",
 				"response": "Bye!",
 				"match_type": "Fuzzy",
-				"priority": 5,
 				"is_active": 1,
 			},
 		]

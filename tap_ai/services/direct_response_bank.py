@@ -216,7 +216,7 @@ def get_direct_response_entries(force_refresh: bool = False) -> List[Dict[str, A
 				"is_active",
 			],
 			filters={"is_active": 1},
-			order_by="priority desc, modified desc",
+			order_by="modified desc",
 		)
 		entries = entries or []
 		_store_entries_in_cache(entries)

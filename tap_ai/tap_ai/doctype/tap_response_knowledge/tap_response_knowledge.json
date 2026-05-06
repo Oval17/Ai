@@ -12,8 +12,7 @@
   "student_query",
   "normalized_query",
   "alternate_queries",
-  "response",
-  "priority",
+    "response",
   "language",
   "user_type",
   "response_tone",
@@ -62,12 +61,6 @@
    "fieldtype": "Long Text",
    "label": "Response",
    "reqd": 1
-  },
-  {
-   "default": "0",
-   "fieldname": "priority",
-   "fieldtype": "Int",
-   "label": "Priority"
   },
   {
    "fieldname": "language",

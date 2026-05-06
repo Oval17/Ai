@@ -23,6 +23,7 @@ from tap_ai.infra.config import get_config
 from tap_ai.services.sql_answerer import answer_from_sql
 from tap_ai.services.rag_answerer import answer_from_pinecone
 from tap_ai.services.direct_answerer import answer_direct
+from tap_ai.services.direct_response_bank import lookup_direct_response
 
 
 # ======================================================
@@ -203,6 +204,14 @@ def process_query(
 ) -> dict:
 
     chat_history = chat_history or []
+
+    direct_bank_hit = lookup_direct_response(
+        query=query,
+        user_profile=user_profile,
+        chat_history=chat_history,
+    )
+    if direct_bank_hit:
+        return _with_meta(direct_bank_hit, query, "direct_llm", False)
 
     # -------- Build user context string (for routing) --------
     user_context = None

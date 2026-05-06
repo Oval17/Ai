@@ -33,6 +33,16 @@ def _save_request_state(request_id: str, state_dict: dict) -> None:
     frappe.cache().set(request_id, json.dumps(state_dict))
 
 
+def _resolve_result_tool(result: dict, fallback_tool: str) -> str:
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    return (
+        metadata.get("primary_engine")
+        or result.get("response_type")
+        or result.get("tool")
+        or fallback_tool
+    )
+
+
 def _publish_vector_search_synthesis(
     request_id: str,
     query: str,
@@ -280,6 +290,7 @@ def process_message(ch, method, properties, body):
         # 4. Run the existing router logic for SQL/direct flows
         out = process_query(query=query, chat_history=chat_history, voice_mode=is_voice)
         answer = out.get("answer", "")
+        resolved_tool = _resolve_result_tool(out, primary_tool)
 
         # 5. Update and save history
         chat_history.append({"role": "user", "content": query})
@@ -310,6 +321,7 @@ def process_message(ch, method, properties, body):
                     "transcribed_text": query,
                     "session_id": session_id,
                     "metadata": metadata,
+                    "tool": resolved_tool,
                 })
                 frappe.cache().set(request_id, json.dumps(state_dict))
 
@@ -337,6 +349,7 @@ def process_message(ch, method, properties, body):
                     "session_id": session_id,
                     "history": chat_history[-10:],
                     "metadata": metadata,
+                    "tool": resolved_tool,
                 })
                 state_dict.setdefault("metadata", {})
                 state_dict["metadata"]["tts_skipped"] = True
@@ -355,6 +368,7 @@ def process_message(ch, method, properties, body):
                 "session_id": session_id,
                 "history": chat_history[-10:],
                 "metadata": metadata,
+                "tool": resolved_tool,
             })
             frappe.cache().set(request_id, json.dumps(state_dict))
             print(f"[✓] Task {request_id} completed successfully.")

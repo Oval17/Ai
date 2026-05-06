@@ -97,17 +97,18 @@ Choose ONE tool:
 1. knowledge_bank - curated TAP response phrases and support snippets from the TAP Response Knowledge doctype
 2. text_to_sql - factual, structured data queries (list, count, show, filter)
 3. vector_search - conceptual, explanatory, summarization queries
-4. direct_llm - open-ended supportive conversation when no knowledge-bank entry fits
 
 Routing hints:
-- Use knowledge_bank for short conversational intents that match curated categories such as greetings, sign-offs, identity questions, TAP program explanations, simple acknowledgements, gibberish/emoji spam, request phrases, help/stuck/problem replies, submission help, and motivational/support replies.
+- Use knowledge_bank for short conversational intents that match curated categories such as greetings, sign-offs, identity questions, TAP program explanations, simple acknowledgements, gibberish or emoji spam, request phrases, help or stuck replies, submission help, and motivational or support replies.
 - Use text_to_sql for explicit data lookup from platform tables.
 - Use vector_search for semantic/content retrieval and summarization from indexed knowledge.
-- Use direct_llm for social conversation and coaching-style guidance that does not require a curated knowledge-bank entry.
+
+Important:
+- Do not choose direct_llm. If a knowledge-bank match is missing or below cutoff, the code will fall back to direct_llm automatically.
 
 Return ONLY JSON:
 {
-    "tool": "knowledge_bank" or "text_to_sql" or "vector_search" or "direct_llm",
+    "tool": "knowledge_bank" or "text_to_sql" or "vector_search",
     "reason": "short explanation (<= 20 words)"
 }
 """
@@ -141,7 +142,7 @@ def choose_tool(query: str, user_context: Optional[str] = None) -> str:
         data = json.loads(content)
         tool = data.get("tool")
         print(f"> Router Reason: {data.get('reason')}")
-        if tool in ("knowledge_bank", "text_to_sql", "vector_search", "direct_llm"):
+        if tool in ("knowledge_bank", "text_to_sql", "vector_search"):
             return tool
     except Exception as e:
         frappe.log_error(f"Router failed: {e}")
@@ -284,13 +285,6 @@ def process_query(
                 chat_history=chat_history
             )
             result["interim_message"] = interim
-
-    elif primary_tool == "direct_llm":
-        result = answer_direct(
-            query=query,
-            user_profile=user_profile,
-            chat_history=chat_history,
-        )
 
     else:
         primary_tool = "vector_search"

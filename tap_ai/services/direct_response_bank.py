@@ -148,9 +148,7 @@ def select_best_response(query: str, entries: Iterable[Dict[str, Any]]) -> Optio
 			score = _score_candidate(query, candidate)
 			if score < threshold:
 				continue
-			if best is None or score > best[0] or (
-				score == best[0] and int(entry.get("priority") or 0) > int(best[1].get("priority") or 0)
-			):
+			if best is None or score > best[0]:
 				if best is not None:
 					second_best_score = max(second_best_score, best[0])
 				best = (score, entry, candidate)
@@ -161,9 +159,6 @@ def select_best_response(query: str, entries: Iterable[Dict[str, Any]]) -> Optio
 		return None
 
 	if best[0] < threshold:
-		return None
-
-	if best[0] < 0.92 and (best[0] - second_best_score) < KB_AMBIGUITY_GAP:
 		return None
 
 	score, entry, matched_query = best
@@ -213,7 +208,7 @@ def get_direct_response_entries(force_refresh: bool = False) -> List[Dict[str, A
 				"normalized_query",
 				"alternate_queries",
 				"response",
-				"priority",
+				# priority removed from selection logic; no longer requested
 				"language",
 				"user_type",
 				"response_tone",
@@ -248,9 +243,7 @@ def probe_direct_response_match(
 
 		for candidate in _entry_candidates(entry):
 			score = _score_candidate(query, candidate)
-			if best is None or score > best[0] or (
-				score == best[0] and int(entry.get("priority") or 0) > int(best[1].get("priority") or 0)
-			):
+			if best is None or score > best[0]:
 				if best is not None:
 					second_best_score = max(second_best_score, best[0])
 				best = (score, entry, candidate)
@@ -269,15 +262,8 @@ def probe_direct_response_match(
 		}
 
 	score, entry, matched_query = best
-	accepted = score >= threshold and not (score < 0.92 and (score - second_best_score) < KB_AMBIGUITY_GAP)
-	if score < threshold:
-		fallback_reason = "below_threshold"
-	elif score < 0.92 and (score - second_best_score) < KB_AMBIGUITY_GAP:
-		fallback_reason = "ambiguous_candidate"
-	elif accepted:
-		fallback_reason = None
-	else:
-		fallback_reason = "rejected_by_kb_gate"
+	accepted = score >= threshold
+	fallback_reason = None if accepted else "below_threshold"
 
 	return {
 		"matched": accepted,
@@ -346,7 +332,7 @@ def lookup_direct_response(
 		"metadata": {
 			"timings_ms": {
 				"knowledge_bank": timing_ms,
-				"total": timing_ms,
+				"processing_total": timing_ms,
 			},
 			"answer_source": "knowledge_bank",
 			"knowledge_bank": {

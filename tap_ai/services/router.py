@@ -23,7 +23,7 @@ from tap_ai.infra.config import get_config
 from tap_ai.services.sql_answerer import answer_from_sql
 from tap_ai.services.rag_answerer import answer_from_pinecone
 from tap_ai.services.direct_answerer import answer_direct
-from tap_ai.services.direct_response_bank import lookup_direct_response
+from tap_ai.services.direct_response_bank import lookup_direct_response, probe_direct_response_match
 
 
 # ======================================================
@@ -189,7 +189,8 @@ def _with_meta(
     res: dict,
     original_query: str,
     primary: str,
-    fallback_used: bool
+    fallback_used: bool,
+    timing_ms: Optional[Dict[str, Any]] = None,
 ) -> dict:
     res.setdefault("metadata", {})
     res["metadata"].update({
@@ -197,6 +198,10 @@ def _with_meta(
         "primary_engine": primary,
         "fallback_used": fallback_used,
     })
+
+    if timing_ms:
+        res["metadata"].setdefault("timings_ms", {})
+        res["metadata"]["timings_ms"].update(timing_ms)
 
     if "routed_doctypes" in res:
         res["metadata"]["doctypes_used"] = res["routed_doctypes"]
@@ -218,6 +223,7 @@ def process_query(
 ) -> dict:
 
     chat_history = chat_history or []
+    process_start = time.perf_counter()
 
     # -------- Build user context string (for routing) --------
     user_context = None
@@ -238,7 +244,9 @@ def process_query(
         user_context = f"{user_context}\n{content_str}" if user_context else content_str
 
     # -------- Choose tool --------
+    routing_start = time.perf_counter()
     primary_tool = choose_tool(query, user_context)
+    routing_ms = int((time.perf_counter() - routing_start) * 1000)
     print(f"> Selected Primary Tool: {primary_tool}")
 
     fallback_used = False
@@ -253,18 +261,36 @@ def process_query(
         )
 
         if result:
-            return _with_meta(result, query, "knowledge_bank", False)
+            processing_ms = int((time.perf_counter() - process_start) * 1000)
+            return _with_meta(
+                result,
+                query,
+                "knowledge_bank",
+                False,
+                timing_ms={"router": routing_ms, "processing_total": processing_ms},
+            )
 
         print("> Knowledge bank miss or low-confidence hit -> falling back to direct LLM")
         fallback_used = True
         primary_tool = "direct_llm"
+        probe = probe_direct_response_match(query)
         result = answer_direct(
             query=query,
             user_profile=user_profile,
             chat_history=chat_history,
         )
 
-        return _with_meta(result, query, primary_tool, fallback_used)
+        result.setdefault("metadata", {})
+        result["metadata"]["knowledge_bank_probe"] = probe
+
+        processing_ms = int((time.perf_counter() - process_start) * 1000)
+        return _with_meta(
+            result,
+            query,
+            primary_tool,
+            fallback_used,
+            timing_ms={"router": routing_ms, "processing_total": processing_ms},
+        )
 
     if primary_tool == "text_to_sql":
         result = answer_from_sql(
@@ -295,7 +321,14 @@ def process_query(
             chat_history=chat_history
         )
 
-    return _with_meta(result, query, primary_tool, fallback_used)
+    processing_ms = int((time.perf_counter() - process_start) * 1000)
+    return _with_meta(
+        result,
+        query,
+        primary_tool,
+        fallback_used,
+        timing_ms={"router": routing_ms, "processing_total": processing_ms},
+    )
 
 
 # ======================================================

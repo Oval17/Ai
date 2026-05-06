@@ -3,6 +3,7 @@
 import frappe
 import json
 import pika
+import time
 from tap_ai.services.router import (
     process_query,
     choose_tool,
@@ -41,6 +42,26 @@ def _resolve_result_tool(result: dict, fallback_tool: str) -> str:
         or result.get("tool")
         or fallback_tool
     )
+
+
+def _apply_end_to_end_timing(state_dict: dict, metadata: dict) -> dict:
+    started_at_ms = state_dict.get("request_started_at_ms")
+    if not started_at_ms:
+        return metadata
+
+    total_e2e_ms = int(time.time() * 1000) - int(started_at_ms)
+    timings_ms = dict(metadata.get("timings_ms") or {})
+    processing_ms = timings_ms.get("processing_total") or timings_ms.get("knowledge_bank") or timings_ms.get("direct_llm") or timings_ms.get("total")
+
+    timings_ms["end_to_end"] = total_e2e_ms
+    timings_ms["queue_wait"] = max(total_e2e_ms - int(processing_ms or 0), 0)
+    if processing_ms is not None:
+        timings_ms["processing"] = int(processing_ms)
+    timings_ms["total"] = total_e2e_ms
+
+    metadata = dict(metadata)
+    metadata["timings_ms"] = timings_ms
+    return metadata
 
 
 def _publish_vector_search_synthesis(
@@ -314,6 +335,7 @@ def process_message(ch, method, properties, body):
 
             if _tts_enabled_for_voice():
                 # Update state so the frontend knows text is done, audio is next.
+                metadata = _apply_end_to_end_timing(state_dict, metadata)
                 state_dict.update({
                     "status": "text_generated",
                     "answer_text": answer,
@@ -322,6 +344,7 @@ def process_message(ch, method, properties, body):
                     "session_id": session_id,
                     "metadata": metadata,
                     "tool": resolved_tool,
+                    "timing_ms": metadata.get("timings_ms", {}).get("total"),
                 })
                 frappe.cache().set(request_id, json.dumps(state_dict))
 
@@ -337,6 +360,7 @@ def process_message(ch, method, properties, body):
                 print(f"[>] Voice detected: Routed {request_id} to audio_tts_queue")
             else:
                 # Text-only fast path for voice mode: finalize immediately.
+                metadata = _apply_end_to_end_timing(state_dict, metadata)
                 state_dict.update({
                     "status": "success",
                     "answer": answer,
@@ -350,6 +374,7 @@ def process_message(ch, method, properties, body):
                     "history": chat_history[-10:],
                     "metadata": metadata,
                     "tool": resolved_tool,
+                    "timing_ms": metadata.get("timings_ms", {}).get("total"),
                 })
                 state_dict.setdefault("metadata", {})
                 state_dict["metadata"]["tts_skipped"] = True
@@ -358,7 +383,7 @@ def process_message(ch, method, properties, body):
 
         else:
             # Standard Text Query - Finish and save to Redis
-            metadata = out.get("metadata", {})
+            metadata = _apply_end_to_end_timing(state_dict, out.get("metadata", {}) or {})
 
             state_dict.update({
                 "status": "success",
@@ -369,6 +394,7 @@ def process_message(ch, method, properties, body):
                 "history": chat_history[-10:],
                 "metadata": metadata,
                 "tool": resolved_tool,
+                "timing_ms": metadata.get("timings_ms", {}).get("total"),
             })
             frappe.cache().set(request_id, json.dumps(state_dict))
             print(f"[✓] Task {request_id} completed successfully.")

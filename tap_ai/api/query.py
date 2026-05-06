@@ -1,6 +1,7 @@
 import frappe
 import json
 import uuid
+import time
 from tap_ai.services.ratelimit import check_rate_limit
 from tap_ai.utils.mq import publish_to_queue
 
@@ -77,6 +78,7 @@ def query():
             "status": "pending",
             "user_id": user_id,
             "mode": "voice" if is_voice else "text",
+            "request_started_at_ms": int(time.time() * 1000),
         }
 
         if is_voice:

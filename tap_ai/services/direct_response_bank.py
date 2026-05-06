@@ -231,6 +231,62 @@ def get_direct_response_entries(force_refresh: bool = False) -> List[Dict[str, A
 		return []
 
 
+def probe_direct_response_match(
+	query: str,
+	entries: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+	"""Return the best KB candidate even when it does not meet the acceptance threshold."""
+	start = time.perf_counter()
+	entries = entries if entries is not None else get_direct_response_entries()
+	threshold = _minimum_score(query)
+	best: Optional[Tuple[float, Dict[str, Any], str]] = None
+	second_best_score = 0.0
+
+	for entry in entries:
+		if not entry or not entry.get("is_active", 1):
+			continue
+
+		for candidate in _entry_candidates(entry):
+			score = _score_candidate(query, candidate)
+			if best is None or score > best[0] or (
+				score == best[0] and int(entry.get("priority") or 0) > int(best[1].get("priority") or 0)
+			):
+				if best is not None:
+					second_best_score = max(second_best_score, best[0])
+				best = (score, entry, candidate)
+			else:
+				second_best_score = max(second_best_score, score)
+
+	timing_ms = int((time.perf_counter() - start) * 1000)
+	if not best:
+		return {
+			"matched": False,
+			"best_score": None,
+			"second_best_score": None,
+			"threshold": threshold,
+			"timing_ms": timing_ms,
+		}
+
+	score, entry, matched_query = best
+	accepted = score >= threshold and not (score < 0.92 and (score - second_best_score) < KB_AMBIGUITY_GAP)
+	return {
+		"matched": accepted,
+		"best_score": round(score, 3),
+		"second_best_score": round(second_best_score, 3),
+		"threshold": threshold,
+		"timing_ms": timing_ms,
+		"knowledge_bank": {
+			"doctype": KB_DOCTYPE,
+			"name": entry.get("name"),
+			"title": entry.get("title"),
+			"category": entry.get("category"),
+			"subcategory": entry.get("subcategory"),
+			"student_query": entry.get("student_query"),
+			"matched_query": matched_query,
+		},
+	}
+
+
 def _render_response(response: str, user_profile: Optional[Dict[str, Any]] = None) -> str:
 	if not response:
 		return ""

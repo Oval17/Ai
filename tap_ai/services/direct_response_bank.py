@@ -265,16 +265,27 @@ def probe_direct_response_match(
 			"second_best_score": None,
 			"threshold": threshold,
 			"timing_ms": timing_ms,
+			"fallback_reason": "no_knowledge_bank_candidate",
 		}
 
 	score, entry, matched_query = best
 	accepted = score >= threshold and not (score < 0.92 and (score - second_best_score) < KB_AMBIGUITY_GAP)
+	if score < threshold:
+		fallback_reason = "below_threshold"
+	elif score < 0.92 and (score - second_best_score) < KB_AMBIGUITY_GAP:
+		fallback_reason = "ambiguous_candidate"
+	elif accepted:
+		fallback_reason = None
+	else:
+		fallback_reason = "rejected_by_kb_gate"
+
 	return {
 		"matched": accepted,
 		"best_score": round(score, 3),
 		"second_best_score": round(second_best_score, 3),
 		"threshold": threshold,
 		"timing_ms": timing_ms,
+		"fallback_reason": fallback_reason,
 		"knowledge_bank": {
 			"doctype": KB_DOCTYPE,
 			"name": entry.get("name"),

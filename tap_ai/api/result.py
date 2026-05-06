@@ -141,6 +141,13 @@ def _normalize_result(data: dict, request_id: str) -> dict:
     if timing_ms is None:
         timing_ms = timings_ms.get("direct_llm") or timings_ms.get("total")
 
+    fallback_reason = data.get("fallback_reason")
+    if fallback_reason is None:
+        fallback_reason = metadata.get("fallback_reason")
+    if fallback_reason is None:
+        kb_probe = metadata.get("knowledge_bank_probe") if isinstance(metadata.get("knowledge_bank_probe"), dict) else {}
+        fallback_reason = kb_probe.get("fallback_reason")
+
     out = {
         "request_id": request_id,
         "mode": mode,
@@ -153,6 +160,7 @@ def _normalize_result(data: dict, request_id: str) -> dict:
         "audio_url": audio_url,
         "language": data.get("language"),
         "timing_ms": timing_ms,
+        "fallback_reason": fallback_reason,
         "error": data.get("error"),
     }
 
@@ -169,6 +177,8 @@ def _normalize_result(data: dict, request_id: str) -> dict:
         out["vector_search"] = data.get("vector_search")
     if "tool" in data:
         out["tool"] = data.get("tool")
+    if "fallback_reason" in metadata and out.get("fallback_reason") is None:
+        out["fallback_reason"] = metadata.get("fallback_reason")
 
     return out
 

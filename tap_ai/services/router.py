@@ -282,6 +282,8 @@ def process_query(
 
         result.setdefault("metadata", {})
         result["metadata"]["knowledge_bank_probe"] = probe
+        if probe.get("fallback_reason"):
+            result["metadata"]["fallback_reason"] = probe.get("fallback_reason")
 
         processing_ms = int((time.perf_counter() - process_start) * 1000)
         return _with_meta(

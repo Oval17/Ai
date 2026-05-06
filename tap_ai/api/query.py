@@ -40,6 +40,7 @@ def query():
         audio_url = (data.get("audio_url") or "").strip()
         user_id = _resolve_user_id(data)
         session_id = data.get("session_id")
+        print(f"[Query API] Entry: q={q!r}, user_id={user_id}")
 
         if not q and not audio_url:
             frappe.throw("Provide one input in POST body: q (text) or audio_url (voice).")
@@ -59,6 +60,7 @@ def query():
             limit=limit,
             window_sec=60
         )
+        print(f"[Query API] Rate limit check: ok={ok}, remaining={remaining}")
         if not ok:
             if is_voice:
                 message = f"Voice query rate limit exceeded. Try again in {reset} seconds."
@@ -91,6 +93,7 @@ def query():
             })
 
         # Keep a bounded TTL for both request types.
+        print(f"[Query API] Cache set OK: request_id={request_id}")
         frappe.cache().set(request_id, json.dumps(state), ex=3600)
 
         if is_voice:
@@ -109,12 +112,16 @@ def query():
                 "user_id": user_id,
             }
             if session_id:
-                payload["session_id"] = session_id
+            print(f"[Query API] Published to queue: request_id={request_id}")
+
+        print(f"[Query API] Returning success: request_id={request_id}")                payload["session_id"] = session_id
             publish_to_queue("text_query_queue", payload)
 
-        return {"request_id": request_id}
-    except frappe.TooManyRequestsError:
-        # Re-raise rate limit errors so they propagate with proper status
+        print(f"[Query API] Rate limit error raised")
+        raise
+    except Exception as e:
+        # Log and return a safe non-empty response
+        print(f"[Query API] Exception caught: {e}")gate with proper status
         raise
     except Exception as e:
         # Log and return a safe non-empty response

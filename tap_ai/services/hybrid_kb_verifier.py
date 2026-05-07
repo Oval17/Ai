@@ -93,7 +93,7 @@ CLASSIFIER_SYSTEM_PROMPT = """You are a strict intent classifier for an educatio
 Allowed Categories: "Greetings", "Gibberish", "Trying to Talk", "Requests", "uncertain".
 
 Use the following strict routing hints to classify the query:
-- "Greetings": Use for general hellos (hi, sup), goodbyes (bye, tata), time-based greetings (good morning, good night), and festival/holiday wishes (Happy Diwali, Merry Christmas).
+- "Greetings": Use for general hellos (hi, sup), goodbyes (bye, tata), hi/bye emoji, time-based greetings (good morning, good night), and festival/holiday wishes (Happy Diwali, Merry Christmas).
 - "Gibberish": Use for random character spam, emoji-only or emoji-dominant messages, AND very short/unclear acknowledgments like "Ok", "K", "Hmm", "Acha", or "thik hai".
 - "Trying to Talk": Use for questions about the bot's identity or the program (who are you, what are points/videos), asking to chat/listen, expressing boredom, reporting problems/asking for help, stating an activity is complete ("done", "submit kar diya"), refusing to submit ("no", "boring"), asking school admin questions, being stuck on ideas ("kya likhun", "no ideas"), expressing excitement/pride, or sharing class promotion news.
 - "Requests": Use for actionable account or task requests, including changing the language, correcting a wrong name, asking HOW to do a submission/what it is ("how to submit", "explain submission"), asking for more time/delaying ("busy hoon", "later"), or affirming readiness to continue ("Yes", "Ready", "chalo", "Continue").

@@ -3,7 +3,7 @@ import json
 import uuid
 import time
 from tap_ai.services.ratelimit import check_rate_limit
-from tap_ai.utils.mq import publish_to_queue
+from tap_ai.utils.mq import publish_to_queue, MQUnavailableError, MQPublishError
 
 
 def _extract_api_key() -> str | None:
@@ -121,11 +121,22 @@ def query():
     except frappe.TooManyRequestsError as e:
         print(f"[Query API] Rate limit error raised")
         raise
+    except MQUnavailableError as e:
+        print(f"[Query API] MQ unavailable: {e}")
+        frappe.local.response["http_status_code"] = 503
+        frappe.throw(str(e))
+    except MQPublishError as e:
+        print(f"[Query API] MQ publish error: {e}")
+        frappe.local.response["http_status_code"] = 500
+        frappe.throw(str(e))
+    except frappe.ValidationError:
+        raise
     except Exception as e:
-        # Log and return a safe non-empty response
+        # Unexpected errors should not return a success-shaped payload.
         print(f"[Query API] Exception caught: {e}")
         try:
             frappe.log_error(str(e), "Query API Error")
         except Exception:
             pass
-        return {"error": str(e), "status": "failed"}
+        frappe.local.response["http_status_code"] = 500
+        frappe.throw("An internal error occurred while processing your request.")

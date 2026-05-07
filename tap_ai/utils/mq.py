@@ -9,6 +9,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+class MQPublishError(Exception):
+    """Base exception for queue publish failures."""
+
+
+class MQUnavailableError(MQPublishError):
+    """Raised when RabbitMQ is unavailable after retries."""
+
 # Connection pool configuration
 POOL_SIZE = 10  # Number of persistent connections to maintain
 MAX_RETRIES = 2
@@ -168,16 +176,16 @@ def publish_to_queue(queue_name: str, payload: dict, retry=True):
                 _pool = None
             return publish_to_queue(queue_name, payload, retry=False)
 
-        frappe.log_error(f"RabbitMQ Connection Failed: {str(e)}", "RabbitMQ Error")  
-        frappe.local.response["http_status_code"] = 503  
-        frappe.throw("The AI service is currently unavailable. Please ensure the background queue is running.")  
+        frappe.log_error(f"RabbitMQ Connection Failed: {str(e)}", "RabbitMQ Error")
+        raise MQUnavailableError(
+            "The AI service is currently unavailable. Please ensure the background queue is running."
+        ) from e
           
     except Exception as e:  
         latency_ms = (time.time() - start_time) * 1000
         _record_metric(latency_ms, success=False)
-        frappe.log_error(f"Failed to publish to {queue_name}: {str(e)}", "RabbitMQ Error")  
-        frappe.local.response["http_status_code"] = 500  
-        frappe.throw("An internal error occurred while queuing your request.")
+        frappe.log_error(f"Failed to publish to {queue_name}: {str(e)}", "RabbitMQ Error")
+        raise MQPublishError("An internal error occurred while queuing your request.") from e
 
   
 def close_connection():  

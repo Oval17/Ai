@@ -51,6 +51,13 @@ Current deployment topology:
 - Dynamic configuration for TAP LMS integration
 - Admin-controlled DocType exclusion system
 
+## 🛠 Recent Updates
+
+- Added a hybrid Knowledge Bank verifier: the system now probes the best KB candidate and asks the LLM to verify whether the candidate appropriately answers the user's query; the LLM either returns the KB response (optionally lightly personalized) or generates a fresh answer. This reduces false positives (e.g., distinguishing "who are you" vs "how are you").
+- Router now uses the hybrid verifier for `knowledge_bank` routed queries.
+- DocType event hooks invalidate the KB cache on insert/update/delete to keep the KB context fresh.
+- A verifier LLM cache is used to reduce latency for repeated verification queries (TTL configurable).
+
 **Technology Stack:**
 - **Backend**: Python 3.10+
 - **Framework**: Frappe (ERPNext)

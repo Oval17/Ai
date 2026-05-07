@@ -226,6 +226,20 @@ def get_direct_response_entries(force_refresh: bool = False) -> List[Dict[str, A
 		return []
 
 
+def invalidate_kb_cache() -> bool:
+	"""Invalidate the in-memory/cache representation of the direct response knowledge.
+
+	This is intended to be called from DocType event hooks when KB entries change.
+	"""
+	try:
+		frappe.cache().delete(KB_CACHE_KEY)
+		print("> Direct response KB cache invalidated")
+		return True
+	except Exception as e:
+		frappe.log_error(f"Failed to invalidate KB cache: {e}", "tap_ai.services.direct_response_bank")
+		return False
+
+
 def probe_direct_response_match(
 	query: str,
 	entries: Optional[List[Dict[str, Any]]] = None,

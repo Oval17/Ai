@@ -24,6 +24,7 @@ from tap_ai.services.sql_answerer import answer_from_sql
 from tap_ai.services.rag_answerer import answer_from_pinecone
 from tap_ai.services.direct_answerer import answer_direct
 from tap_ai.services.direct_response_bank import lookup_direct_response, probe_direct_response_match
+from tap_ai.services.hybrid_kb_verifier import verify_and_respond as verify_kb_and_respond
 
 
 # ======================================================
@@ -254,43 +255,19 @@ def process_query(
 
     # -------- Execute --------
     if primary_tool == "knowledge_bank":
-        result = lookup_direct_response(
+        # Hybrid approach: probe KB for best candidate, then ask LLM to verify/use it.
+        result = verify_kb_and_respond(
             query=query,
             user_profile=user_profile,
             chat_history=chat_history,
         )
-
-        if result:
-            processing_ms = int((time.perf_counter() - process_start) * 1000)
-            return _with_meta(
-                result,
-                query,
-                "knowledge_bank",
-                False,
-                timing_ms={"router": routing_ms, "processing_total": processing_ms},
-            )
-
-        print("> Knowledge bank miss or low-confidence hit -> falling back to direct LLM")
-        fallback_used = True
-        primary_tool = "direct_llm"
-        probe = probe_direct_response_match(query)
-        result = answer_direct(
-            query=query,
-            user_profile=user_profile,
-            chat_history=chat_history,
-        )
-
-        result.setdefault("metadata", {})
-        result["metadata"]["knowledge_bank_probe"] = probe
-        if probe.get("fallback_reason"):
-            result["metadata"]["fallback_reason"] = probe.get("fallback_reason")
 
         processing_ms = int((time.perf_counter() - process_start) * 1000)
         return _with_meta(
             result,
             query,
-            primary_tool,
-            fallback_used,
+            "knowledge_bank",
+            False,
             timing_ms={"router": routing_ms, "processing_total": processing_ms},
         )
 

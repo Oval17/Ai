@@ -336,35 +336,61 @@ def lookup_direct_response(
 	if not match:
 		return None
 
+	answer = _render_response(match.get("response", ""), user_profile=user_profile).strip()
+	timing_ms = int((time.perf_counter() - start) * 1000)
+	return {
+		"question": query,
+		"answer": answer,
+		"response_type": "knowledge_bank",
+		"user_context": "personalized" if user_profile else "general",
+		"metadata": {
+			"timings_ms": {
+				"knowledge_bank": timing_ms,
+				"processing_total": timing_ms,
+			},
+			"answer_source": "knowledge_bank",
+			"knowledge_bank": {
+				"doctype": KB_DOCTYPE,
+				"name": match.get("name"),
+				"title": match.get("title"),
+				"category": match.get("category"),
+				"subcategory": match.get("subcategory"),
+				"student_query": match.get("student_query"),
+				"matched_query": match.get("matched_query"),
+				"match_score": match.get("match_score"),
+			},
+		},
+	}
 
-	def get_entries_for_category(category: str, force_refresh: bool = False) -> List[Dict[str, Any]]:
-		"""Return KB entries for a specific category.
 
-		This returns a list of objects with stable fields used by the selection LLM:
-		- id (mapped from `name`)
-		- student_query
-		- alternate_queries
-		- response
-		- title
-		- subcategory
-		- is_active
-		"""
-		entries = get_direct_response_entries(force_refresh=force_refresh)
-		if not entries:
-			return []
-		filtered: List[Dict[str, Any]] = []
-		for e in entries:
-			if not e or not e.get("is_active", 1):
-				continue
-			if (e.get("category") or "").strip().lower() != (category or "").strip().lower():
-				continue
-			filtered.append({
-				"id": e.get("name"),
-				"title": e.get("title"),
-				"student_query": e.get("student_query"),
-				"alternate_queries": e.get("alternate_queries"),
-				"response": e.get("response"),
-				"subcategory": e.get("subcategory"),
-				"is_active": e.get("is_active", 1),
-			})
-		return filtered
+def get_entries_for_category(category: str, force_refresh: bool = False) -> List[Dict[str, Any]]:
+	"""Return KB entries for a specific category.
+
+	This returns a list of objects with stable fields used by the selection LLM:
+	- id (mapped from `name`)
+	- student_query
+	- alternate_queries
+	- response
+	- title
+	- subcategory
+	- is_active
+	"""
+	entries = get_direct_response_entries(force_refresh=force_refresh)
+	if not entries:
+		return []
+	filtered: List[Dict[str, Any]] = []
+	for e in entries:
+		if not e or not e.get("is_active", 1):
+			continue
+		if (e.get("category") or "").strip().lower() != (category or "").strip().lower():
+			continue
+		filtered.append({
+			"id": e.get("name"),
+			"title": e.get("title"),
+			"student_query": e.get("student_query"),
+			"alternate_queries": e.get("alternate_queries"),
+			"response": e.get("response"),
+			"subcategory": e.get("subcategory"),
+			"is_active": e.get("is_active", 1),
+		})
+	return filtered

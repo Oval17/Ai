@@ -1,13 +1,16 @@
 """
-Hybrid Knowledge Bank Verifier
+LLM-first Knowledge Bank Verifier
 
 Flow:
-1. Run fuzzy/probe match to get the best KB candidate (even if below threshold)
-2. Provide the query + candidate metadata + KB response to the LLM
-3. LLM decides: accept KB response (return it) OR generate an original answer
-4. Cache LLM verification results to reduce repeated latency
+1. Classify the user's query category using a strict LLM classifier (returns JSON).
+2. If a KB category is returned: fetch all entries for that category and ask a selection LLM
+    to choose the best entry or synthesize a short KB-grounded reply.
+3. If the classifier returns "uncertain" (or fails): generate a direct LLM reply (no fuzzy/probe fallback).
+4. Cache LLM outputs to reduce repeated latency.
 
-Return structure mirrors other answerers: question, answer, response_type, user_context, metadata
+This verifier replaces the previous fuzzy/probe-based acceptance flow with an LLM-first
+classification + selection pipeline. The function returns a dict with keys: question,
+answer, response_type, user_context, and metadata.
 """
 
 import json
@@ -19,8 +22,9 @@ import frappe
 from tap_ai.infra.config import get_config
 from tap_ai.infra.llm_client import LLMClient
 from tap_ai.services.direct_response_bank import (
-    probe_direct_response_match,
+    # probe_direct_response_match,  # probe-based flow replaced by LLM-first
     get_direct_response_entries,
+    get_entries_for_category,
     _render_response,
 )
 from tap_ai.services.prompt_bank import get_system_message_for_context
@@ -84,118 +88,158 @@ Return ONLY JSON and nothing else.
 '''
 
 
+CLASSIFIER_SYSTEM_PROMPT = """You are a strict intent classifier for an educational learning companion. You will receive JSON input containing a user query and must return EXACT JSON with one key: {"category":"<one-of-allowed_categories-or-uncertain>"}. Do not return any text outside the JSON.
+
+Allowed Categories: "Greetings", "Gibberish", "Trying to Talk", "Requests", "uncertain".
+
+Use the following strict routing hints to classify the query:
+- "Greetings": Use for general hellos (hi, sup), goodbyes (bye, tata), time-based greetings (good morning, good night), and festival/holiday wishes (Happy Diwali, Merry Christmas).
+- "Gibberish": Use for random character spam, emoji-only or emoji-dominant messages, AND very short/unclear acknowledgments like "Ok", "K", "Hmm", "Acha", or "thik hai".
+- "Trying to Talk": Use for questions about the bot's identity or the program (who are you, what are points/videos), asking to chat/listen, expressing boredom, reporting problems/asking for help, stating an activity is complete ("done", "submit kar diya"), refusing to submit ("no", "boring"), asking school admin questions, being stuck on ideas ("kya likhun", "no ideas"), expressing excitement/pride, or sharing class promotion news.
+- "Requests": Use for actionable account or task requests, including changing the language, correcting a wrong name, asking HOW to do a submission/what it is ("how to submit", "explain submission"), asking for more time/delaying ("busy hoon", "later"), or affirming readiness to continue ("Yes", "Ready", "chalo", "Continue").
+
+Disambiguation Rules:
+- If the user says they FINISHED the submission -> "Trying to Talk".
+- If the user asks HOW to do the submission or WHAT it is -> "Requests".
+- If the user says they will do it LATER ("baad mein karunga") -> "Requests".
+
+If the query does not fit any category clearly, return "uncertain"."""
+
+SELECTION_SYSTEM_PROMPT = '''You are a strict responder that MUST return EXACT JSON only. Input: user_query and an array `entries` where each entry has `id`, `student_query`, `alternate_queries`, `response`. Choose best matching entry or synthesize a short reply grounded in entries.
+
+Return one of:
+{"match":"<id>","source":"kb_exact"}
+{"match":"<id>","source":"kb_synthesized","synthesized":"<short reply>"}
+{"match":null,"source":"llm_generated","synthesized":"<short reply>"}
+
+Do NOT invent ids. Keep synthesized replies concise (1-2 sentences).'''
+
+
 def verify_and_respond(query: str, user_profile: Optional[Dict[str, Any]] = None, chat_history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
+    """LLM-first classifier + selection flow.
+
+    1. Classify query category with a small LLM classifier.
+    2. If category != "uncertain": fetch entries for that category and ask selection LLM to choose or synthesize.
+    3. If category == "uncertain": generate a direct LLM reply (no fuzzy probe fallback).
+    """
     start = time.perf_counter()
     chat_history = chat_history or []
 
-    # Probe best KB candidate (even if below threshold)
-    probe = probe_direct_response_match(query)
+    # 1) Determine allowed categories from KB
+    all_entries = get_direct_response_entries()
+    allowed_categories = sorted({(e.get("category") or "").strip() for e in all_entries if e and e.get("is_active", 1)})
 
-    kb_info = probe.get("knowledge_bank") or {}
-    kb_name = kb_info.get("name")
-
-    # Load entries to find full entry if available
-    entries = get_direct_response_entries()
-    matched_entry = None
-    if kb_name:
-        for e in entries:
-            if e.get("name") == kb_name:
-                matched_entry = e
-                break
-
-    kb_response_text = ""
-    if matched_entry:
-        kb_response_text = _render_response(matched_entry.get("response", ""), user_profile=user_profile)
-
-    # Build LLM prompt with candidate metadata
-    personalization = ""
-    if user_profile and user_profile.get("name"):
-        personalization = f"Student: {user_profile.get('name')}"
-        if user_profile.get("grade"):
-            personalization += f", Grade: {user_profile.get('grade')}"
-
-    candidate_preview = {
-        "title": kb_info.get("title"),
-        "matched_query": kb_info.get("matched_query"),
-        "match_score": probe.get("best_score"),
-        "category": kb_info.get("category"),
-    }
-
-    user_context = personalization
-    if chat_history:
-        user_context += "\nRecent chat: " + " | ".join([m.get('content','') for m in chat_history[-3:]])
-
-    messages = []
-
+    # Build classifier prompt payload
+    classifier_input = {"query": query, "allowed_categories": allowed_categories}
+    classifier_messages = []
     try:
         persona = get_system_message_for_context(user_profile=user_profile)
-        messages.append(("system", persona))
+        classifier_messages.append(("system", persona))
+    except Exception:
+        pass
+    classifier_messages.append(("system", CLASSIFIER_SYSTEM_PROMPT))
+    classifier_messages.append(("user", json.dumps(classifier_input)))
+
+    model = get_config("primary_llm_model") or "gpt-4o-mini"
+    raw_classify = _llm_invoke_cached(classifier_messages, model=model, temperature=0.0, max_tokens=60)
+
+    # Parse classifier output
+    category = None
+    try:
+        cleaned = raw_classify.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(cleaned)
+        category = parsed.get("category")
+    except Exception:
+        category = None
+
+    # If classifier failed or returned uncertain, generate LLM response directly
+    if not category or (isinstance(category, str) and category.strip().lower() == "uncertain"):
+        # Direct LLM generation (persona + system + user query)
+        messages = []
+        try:
+            persona = get_system_message_for_context(user_profile=user_profile)
+            messages.append(("system", persona))
+        except Exception:
+            pass
+        messages.append(("system", "You are TAP Buddy. Answer concisely in a friendly student-facing tone."))
+        if chat_history:
+            messages.append(("system", "Recent chat: " + " | ".join([m.get('content','') for m in chat_history[-3:]])))
+        messages.append(("user", query))
+        raw = _llm_invoke_cached(messages, model=model, temperature=0.3, max_tokens=300)
+        timing_ms = int((time.perf_counter() - start) * 1000)
+        return {
+            "question": query,
+            "answer": str(raw).strip(),
+            "response_type": "llm_generated",
+            "user_context": "personalized" if user_profile else "general",
+            "metadata": {"classifier_raw": raw_classify, "decision": "llm_generated", "timing_ms": timing_ms},
+        }
+
+    # 2) Fetch entries for chosen category and call selection LLM
+    entries = get_entries_for_category(category)
+    # Build entries payload (keep fields user requested)
+    entries_payload = [
+        {"id": e.get("id"), "student_query": e.get("student_query"), "alternate_queries": e.get("alternate_queries"), "response": e.get("response")}
+        for e in entries
+    ]
+
+    selection_messages = []
+    try:
+        persona = get_system_message_for_context(user_profile=user_profile)
+        selection_messages.append(("system", persona))
     except Exception:
         pass
 
-    messages.extend([
-        ("system", SYSTEM_PROMPT),
-        ("system", f"User intent should drive the decision. Ignore the score unless it helps understand confidence: {probe.get('best_score')}"),
-        ("system", f"Candidate metadata: {json.dumps(candidate_preview, default=str)}"),
-        ("system", f"Candidate KB response: {kb_response_text[:200]}")
-    ])
+    selection_messages.append(("system", SELECTION_SYSTEM_PROMPT))
+    selection_messages.append(("user", json.dumps({"user_query": query, "entries": entries_payload}, ensure_ascii=False)))
 
-    if user_context:
-        messages.append(("system", user_context))
+    raw_selection = _llm_invoke_cached(selection_messages, model=model, temperature=0.2, max_tokens=600)
 
-    messages.append(("user", f"User query: {query}\n\nDecide whether to use the candidate KB response or generate an answer."))
-
-    model = get_config("primary_llm_model") or "gpt-4o-mini"
-    raw = _llm_invoke_cached(messages, model=model, temperature=0.2)
-
-    # Try to parse JSON from LLM
-    decision = None
+    # Parse selection LLM JSON
     try:
-        cleaned = raw.replace("```json", "").replace("```", "").strip()
-        decision = json.loads(cleaned)
+        cleaned = raw_selection.replace("```json", "").replace("```", "").strip()
+        selection_decision = json.loads(cleaned)
     except Exception:
-        # If LLM didn't return JSON, fall back to direct LLM unless KB clearly matches the exact intent.
-        return {
-            "question": query,
-            "answer": raw,
-            "response_type": "llm_generated",
-            "user_context": "personalized" if user_profile else "general",
-            "metadata": {"knowledge_bank_probe": probe, "decision_reason": "llm_malformed_output_fallback_to_llm"},
-        }
+        # If malformed, fall back to generating an LLM reply (safe path)
+        raw = _llm_invoke_cached([( "system", "You are TAP Buddy."), ("user", query)], model=model, temperature=0.3, max_tokens=300)
+        timing_ms = int((time.perf_counter() - start) * 1000)
+        return {"question": query, "answer": str(raw).strip(), "response_type": "llm_generated", "user_context": "personalized" if user_profile else "general", "metadata": {"classifier": category, "selection_raw": raw_selection, "decision": "llm_generated_malformed_selection", "timing_ms": timing_ms}}
 
-    action = (decision.get("action") or "").lower()
-    final_answer = decision.get("final_answer") or ""
-    reason = decision.get("reason") or ""
+    match = selection_decision.get("match")
+    source = selection_decision.get("source")
+    synthesized = selection_decision.get("synthesized")
+
+    # If matched a KB id, find entry and render response
+    answer_text = ""
+    if match:
+        entry_map = {e.get("id"): e for e in entries}
+        chosen = entry_map.get(match)
+        if chosen:
+            base = chosen.get("response") or ""
+            if source == "kb_exact":
+                answer_text = _render_response(base, user_profile=user_profile)
+                response_type = "knowledge_bank"
+            else:
+                # kb_synthesized
+                if synthesized:
+                    answer_text = synthesized
+                else:
+                    answer_text = _render_response(base, user_profile=user_profile)
+                response_type = "knowledge_bank_synthesized"
+        else:
+            # LLM returned an id we don't have -> treat as llm_generated
+            answer_text = synthesized or ""
+            response_type = "llm_generated"
+    else:
+        # No KB match selected
+        answer_text = synthesized or ""
+        response_type = "llm_generated" if source == "llm_generated" else "knowledge_bank_synthesized"
 
     timing_ms = int((time.perf_counter() - start) * 1000)
-
-    if action == "use_kb":
-        # Prefer the KB-rendered response, but allow LLM to slightly adjust wording (final_answer may include it)
-        answer_text = final_answer or kb_response_text or ""
-        return {
-            "question": query,
-            "answer": answer_text,
-            "response_type": "knowledge_bank_verified",
-            "user_context": "personalized" if user_profile else "general",
-            "metadata": {
-                "knowledge_bank_probe": probe,
-                "decision": "use_kb",
-                "decision_reason": reason,
-                "timing_ms": timing_ms,
-            },
-        }
-
-    # Default: LLM generated
-    answer_text = final_answer or raw or ""
     return {
         "question": query,
         "answer": answer_text,
-        "response_type": "llm_generated",
+        "response_type": response_type,
         "user_context": "personalized" if user_profile else "general",
-        "metadata": {
-            "knowledge_bank_probe": probe,
-            "decision": "llm_answer",
-            "decision_reason": reason,
-            "timing_ms": timing_ms,
-        },
+        "metadata": {"classifier": category, "selection_raw": raw_selection, "decision": source, "timing_ms": timing_ms},
     }

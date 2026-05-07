@@ -20,6 +20,44 @@ def _load_from_disk() -> Dict[str, Any]:
         return {}
 
 
+def _load_from_doctype() -> Dict[str, Any]:
+    try:
+        if not frappe.db.exists("DocType", "Prompt Suggestion"):
+            return {}
+
+        rows = frappe.get_all(
+            "Prompt Suggestion",
+            filters={"is_active": 1},
+            fields=["name", "identifier", "title", "description", "system_prompt", "is_default"],
+            order_by="is_default desc, modified desc",
+        )
+        if not rows:
+            return {}
+
+        payload: Dict[str, Any] = {}
+        default_row = None
+        for row in rows:
+            key = row.get("identifier") or row.get("name")
+            payload[key] = {
+                "id": row.get("identifier") or row.get("name"),
+                "title": row.get("title"),
+                "description": row.get("description"),
+                "system_prompt": row.get("system_prompt") or "",
+            }
+            if row.get("is_default") and not default_row:
+                default_row = payload[key]
+
+        if default_row:
+            payload["default"] = default_row
+        elif rows:
+            first_key = rows[0].get("identifier") or rows[0].get("name")
+            payload["default"] = payload.get(first_key, {})
+
+        return payload
+    except Exception:
+        return {}
+
+
 def _get_all() -> Dict[str, Any]:
     try:
         cached = frappe.cache().get(CACHE_KEY)
@@ -30,7 +68,7 @@ def _get_all() -> Dict[str, Any]:
     except Exception:
         pass
 
-    data = _load_from_disk()
+    data = _load_from_doctype() or _load_from_disk()
     try:
         frappe.cache().set(CACHE_KEY, json.dumps(data), ex=3600)
     except Exception:

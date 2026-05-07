@@ -25,7 +25,6 @@ from tap_ai.services.rag_answerer import answer_from_pinecone
 from tap_ai.services.direct_answerer import answer_direct
 from tap_ai.services.direct_response_bank import lookup_direct_response, probe_direct_response_match
 from tap_ai.services.hybrid_kb_verifier import verify_and_respond as verify_kb_and_respond
-from tap_ai.services.prompt_bank import get_system_message_for_context
 
 
 # ======================================================
@@ -130,12 +129,7 @@ def choose_tool(query: str, user_context: Optional[str] = None) -> str:
         except Exception:
             pass
 
-        # Prepend router system prompt and the TAP Buddy persona system prompt (if available)
-        try:
-            persona_system = get_system_message_for_context(user_profile=None, content_details=None)
-            messages = [("system", ROUTER_PROMPT), ("system", persona_system), ("user", prompt)]
-        except Exception:
-            messages = [("system", ROUTER_PROMPT), ("user", prompt)]
+        messages = [("system", ROUTER_PROMPT), ("user", prompt)]
 
         content = llm_invoke_cached(
             messages,

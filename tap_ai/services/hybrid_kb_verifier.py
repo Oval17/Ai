@@ -63,7 +63,7 @@ def _llm_invoke_cached(messages: List, model: str, temperature: float = 0.0, cac
     return content
 
 
-SYSTEM_PROMPT = '''You are an assistant that decides whether a curated Knowledge Bank response fits a user's query.
+SYSTEM_PROMPT = '''You are an assistant that decides whether a curated Knowledge Bank response matches the user's intent.
 
 Input includes:
 - User query
@@ -71,8 +71,12 @@ Input includes:
 - The curated KB response text
 
 Task:
-1) If the candidate KB response directly answers the user's query and is appropriate, return JSON: {"action": "use_kb", "final_answer": "<the KB response possibly lightly personalized>", "reason": "short explanation"}
-2) If the KB response is not appropriate, generate a helpful answer from your own knowledge and return JSON: {"action": "llm_answer", "final_answer": "<LLM-generated answer>", "reason": "short explanation"}
+1) If the user's intent is the same as the candidate's intent, return JSON: {"action": "use_kb", "final_answer": "<the KB response possibly lightly personalized>", "reason": "short explanation"}
+2) If the intent is different, return JSON: {"action": "llm_answer", "final_answer": "<LLM-generated answer>", "reason": "short explanation"}
+
+Intent matters more than fuzzy score.
+If the query is a greeting, small talk, identity question, or program explanation and the KB candidate matches that same intent, use KB.
+If the query asks something else, do not force KB just because the response is semantically related.
 
 Be concise. Preserve any essential facts from the KB when using it. Personalize using student name/grade if provided.
 
@@ -121,8 +125,7 @@ def verify_and_respond(query: str, user_profile: Optional[Dict[str, Any]] = None
     if chat_history:
         user_context += "\nRecent chat: " + " | ".join([m.get('content','') for m in chat_history[-3:]])
 
-    messages = [
-    ]
+    messages = []
 
     try:
         persona = get_system_message_for_context(user_profile=user_profile)
@@ -132,6 +135,7 @@ def verify_and_respond(query: str, user_profile: Optional[Dict[str, Any]] = None
 
     messages.extend([
         ("system", SYSTEM_PROMPT),
+        ("system", f"User intent should drive the decision. Ignore the score unless it helps understand confidence: {probe.get('best_score')}"),
         ("system", f"Candidate metadata: {json.dumps(candidate_preview, default=str)}"),
         ("system", f"Candidate KB response: {kb_response_text[:200]}")
     ])
@@ -150,23 +154,14 @@ def verify_and_respond(query: str, user_profile: Optional[Dict[str, Any]] = None
         cleaned = raw.replace("```json", "").replace("```", "").strip()
         decision = json.loads(cleaned)
     except Exception:
-        # If LLM didn't return JSON, fall back: if probe accepted, use KB; else use LLM raw answer
-        if probe.get("matched"):
-            return {
-                "question": query,
-                "answer": kb_response_text,
-                "response_type": "knowledge_bank_verified",
-                "user_context": "personalized" if user_profile else "general",
-                "metadata": {"knowledge_bank_probe": probe, "decision_reason": "llm_malformed_output_fallback_to_probe"},
-            }
-        else:
-            return {
-                "question": query,
-                "answer": raw,
-                "response_type": "llm_generated",
-                "user_context": "personalized" if user_profile else "general",
-                "metadata": {"knowledge_bank_probe": probe, "decision_reason": "llm_malformed_output_no_probe"},
-            }
+        # If LLM didn't return JSON, fall back to direct LLM unless KB clearly matches the exact intent.
+        return {
+            "question": query,
+            "answer": raw,
+            "response_type": "llm_generated",
+            "user_context": "personalized" if user_profile else "general",
+            "metadata": {"knowledge_bank_probe": probe, "decision_reason": "llm_malformed_output_fallback_to_llm"},
+        }
 
     action = (decision.get("action") or "").lower()
     final_answer = decision.get("final_answer") or ""

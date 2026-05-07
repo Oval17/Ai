@@ -17,4 +17,11 @@ doc_events = {
 	}
 }
 
+# Invalidate prompt cache when prompt suggestions (if implemented as a doctype) change
+doc_events["Prompt Suggestion"] = {
+    "after_insert": "tap_ai.services.prompt_bank.invalidate_prompt_cache",
+    "after_update": "tap_ai.services.prompt_bank.invalidate_prompt_cache",
+    "after_delete": "tap_ai.services.prompt_bank.invalidate_prompt_cache",
+}
+
 

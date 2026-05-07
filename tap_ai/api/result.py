@@ -19,6 +19,20 @@ VECTOR_SEARCH_DONE_STATES = {
 }
 
 
+def _close_http_connection() -> None:
+    try:
+        response_headers = getattr(frappe.local, "response_headers", None)
+        if response_headers is None:
+            frappe.local.response_headers = []
+            response_headers = frappe.local.response_headers
+
+        header = ("Connection", "close")
+        if header not in response_headers:
+            response_headers.append(header)
+    except Exception:
+        pass
+
+
 def _to_int(value, default: int, min_value: int, max_value: int) -> int:
     try:
         parsed = int(value)
@@ -225,44 +239,74 @@ def result(
     - wait_seconds: 0-55, or omit for auto (text: 8s, voice: 25s)
     - poll_interval_ms: 100-2000, or omit for auto (text: 300ms, voice: 500ms)
     """
-    request_id = (request_id or "").strip()
-    phase = (phase or "answer").strip().lower()
-    if not request_id:
-        return _empty_result(request_id, error="Missing request_id")
+    try:
+        request_id = (request_id or "").strip()
+        phase = (phase or "answer").strip().lower()
+        if not request_id:
+            return _empty_result(request_id, error="Missing request_id")
 
-    cached = frappe.cache().get(request_id)
-    data, error = _safe_load_cache_payload(cached)
-    if error:
-        return _empty_result(request_id, error=f"No such request_id or unavailable state: {request_id}")
+        cached = frappe.cache().get(request_id)
+        data, error = _safe_load_cache_payload(cached)
+        if error:
+            return _empty_result(request_id, error=f"No such request_id or unavailable state: {request_id}")
 
-    if phase == "search":
+        if phase == "search":
+            is_voice = _is_voice_response(data, request_id)
+            wait_seconds = _resolve_wait_seconds(wait_seconds, is_voice=is_voice)
+            poll_interval_ms = _resolve_poll_interval_ms(poll_interval_ms, is_voice=is_voice)
+
+            if wait_seconds == 0:
+                search_out = _normalize_vector_search_result(data, request_id)
+                if search_out:
+                    return search_out
+                out = _normalize_result(data, request_id)
+                out["phase"] = "search"
+                out["phase_complete"] = False
+                out["next_phase"] = "answer"
+                return out
+
+            deadline = time.monotonic() + wait_seconds
+
+            while True:
+                search_out = _normalize_vector_search_result(data, request_id)
+                if search_out:
+                    return search_out
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    out = _normalize_result(data, request_id)
+                    out["phase"] = "search"
+                    out["phase_complete"] = False
+                    out["next_phase"] = "answer"
+                    return out
+
+                time.sleep(min(poll_interval_ms / 1000.0, remaining))
+
+                cached = frappe.cache().get(request_id)
+                data, error = _safe_load_cache_payload(cached)
+                if error:
+                    return _empty_result(request_id, error=f"No such request_id or unavailable state: {request_id}")
+
+        out = _normalize_result(data, request_id)
+
+        if data.get("status") == "vector_search_failed":
+            return _empty_result(request_id, status="failed", error=data.get("error") or "Vector search failed")
+
+        if out.get("status") != "processing":
+            return out
+
         is_voice = _is_voice_response(data, request_id)
         wait_seconds = _resolve_wait_seconds(wait_seconds, is_voice=is_voice)
         poll_interval_ms = _resolve_poll_interval_ms(poll_interval_ms, is_voice=is_voice)
 
         if wait_seconds == 0:
-            search_out = _normalize_vector_search_result(data, request_id)
-            if search_out:
-                return search_out
-            out = _normalize_result(data, request_id)
-            out["phase"] = "search"
-            out["phase_complete"] = False
-            out["next_phase"] = "answer"
             return out
 
         deadline = time.monotonic() + wait_seconds
 
         while True:
-            search_out = _normalize_vector_search_result(data, request_id)
-            if search_out:
-                return search_out
-
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                out = _normalize_result(data, request_id)
-                out["phase"] = "search"
-                out["phase_complete"] = False
-                out["next_phase"] = "answer"
                 return out
 
             time.sleep(min(poll_interval_ms / 1000.0, remaining))
@@ -272,35 +316,8 @@ def result(
             if error:
                 return _empty_result(request_id, error=f"No such request_id or unavailable state: {request_id}")
 
-    out = _normalize_result(data, request_id)
-
-    if data.get("status") == "vector_search_failed":
-        return _empty_result(request_id, status="failed", error=data.get("error") or "Vector search failed")
-
-    if out.get("status") != "processing":
-        return out
-
-    is_voice = _is_voice_response(data, request_id)
-    wait_seconds = _resolve_wait_seconds(wait_seconds, is_voice=is_voice)
-    poll_interval_ms = _resolve_poll_interval_ms(poll_interval_ms, is_voice=is_voice)
-
-    if wait_seconds == 0:
-        return out
-
-    deadline = time.monotonic() + wait_seconds
-
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return out
-
-        time.sleep(min(poll_interval_ms / 1000.0, remaining))
-
-        cached = frappe.cache().get(request_id)
-        data, error = _safe_load_cache_payload(cached)
-        if error:
-            return _empty_result(request_id, error=f"No such request_id or unavailable state: {request_id}")
-
-        out = _normalize_result(data, request_id)
-        if out.get("status") != "processing":
-            return out
+            out = _normalize_result(data, request_id)
+            if out.get("status") != "processing":
+                return out
+    finally:
+        _close_http_connection()

@@ -112,19 +112,18 @@ def query():
                 "user_id": user_id,
             }
             if session_id:
-            print(f"[Query API] Published to queue: request_id={request_id}")
-
-        print(f"[Query API] Returning success: request_id={request_id}")                payload["session_id"] = session_id
+                payload["session_id"] = session_id
             publish_to_queue("text_query_queue", payload)
 
+        print(f"[Query API] Published to queue: request_id={request_id}")
+        return {"request_id": request_id, "status": "queued"}
+
+    except frappe.TooManyRequestsError as e:
         print(f"[Query API] Rate limit error raised")
         raise
     except Exception as e:
         # Log and return a safe non-empty response
-        print(f"[Query API] Exception caught: {e}")gate with proper status
-        raise
-    except Exception as e:
-        # Log and return a safe non-empty response
+        print(f"[Query API] Exception caught: {e}")
         try:
             frappe.log_error(str(e), "Query API Error")
         except Exception:

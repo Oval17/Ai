@@ -23,6 +23,7 @@ from tap_ai.services.direct_response_bank import (
     get_direct_response_entries,
     _render_response,
 )
+from tap_ai.services.prompt_bank import get_system_message_for_context
 
 
 LLM_VERIFIER_CACHE_TTL = 900  # 15 minutes
@@ -121,10 +122,19 @@ def verify_and_respond(query: str, user_profile: Optional[Dict[str, Any]] = None
         user_context += "\nRecent chat: " + " | ".join([m.get('content','') for m in chat_history[-3:]])
 
     messages = [
+    ]
+
+    try:
+        persona = get_system_message_for_context(user_profile=user_profile)
+        messages.append(("system", persona))
+    except Exception:
+        pass
+
+    messages.extend([
         ("system", SYSTEM_PROMPT),
         ("system", f"Candidate metadata: {json.dumps(candidate_preview, default=str)}"),
         ("system", f"Candidate KB response: {kb_response_text[:200]}")
-    ]
+    ])
 
     if user_context:
         messages.append(("system", user_context))

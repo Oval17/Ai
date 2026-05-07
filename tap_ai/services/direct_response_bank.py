@@ -368,29 +368,3 @@ def lookup_direct_response(
 				"is_active": e.get("is_active", 1),
 			})
 		return filtered
-
-	answer = _render_response(match.get("response", ""), user_profile=user_profile).strip()
-	timing_ms = int((time.perf_counter() - start) * 1000)
-	return {
-		"question": query,
-		"answer": answer,
-		"response_type": "knowledge_bank",
-		"user_context": "personalized" if user_profile else "general",
-		"metadata": {
-			"timings_ms": {
-				"knowledge_bank": timing_ms,
-				"processing_total": timing_ms,
-			},
-			"answer_source": "knowledge_bank",
-			"knowledge_bank": {
-				"doctype": KB_DOCTYPE,
-				"name": match.get("name"),
-				"title": match.get("title"),
-				"category": match.get("category"),
-				"subcategory": match.get("subcategory"),
-				"student_query": match.get("student_query"),
-				"matched_query": match.get("matched_query"),
-				"match_score": match.get("match_score"),
-			},
-		},
-	}

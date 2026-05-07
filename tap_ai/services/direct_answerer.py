@@ -9,6 +9,7 @@ import frappe
 from langchain_openai import ChatOpenAI
 
 from tap_ai.infra.config import get_config
+from tap_ai.services.prompt_bank import get_system_message_for_context
 
 
 def _llm(model: str = "gpt-4o-mini", temperature: float = 0.4) -> ChatOpenAI:
@@ -48,6 +49,7 @@ def answer_direct(
 ) -> Dict[str, Any]:
     """Generate a direct conversational response without SQL or RAG retrieval."""
     start = time.perf_counter()
+
     llm = _llm(model=get_config("primary_llm_model") or "gpt-4o-mini")
     chat_history = chat_history or []
 
@@ -62,10 +64,18 @@ def answer_direct(
         else ""
     )
 
+    try:
+        persona = get_system_message_for_context(user_profile=user_profile)
+    except Exception:
+        persona = ""
+
     messages = [
         ("system", DIRECT_CHAT_SYSTEM_PROMPT),
-        ("system", personalization) if personalization else ("system", ""),
     ]
+    if persona:
+        messages.append(("system", persona))
+    if personalization:
+        messages.append(("system", personalization))
 
     # Keep only recent conversational context.
     for msg in chat_history[-4:]:

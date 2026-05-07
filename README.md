@@ -1,6 +1,6 @@
 # TAP AI - Conversational AI Engine
 
-This project extends the TAP AI Frappe application with a powerful, conversational AI layer. It provides a single, robust API endpoint that can understand user questions and intelligently route them to the best tool—either a direct database query or a semantic vector search—to provide accurate, context-aware answers.
+This project extends the TAP AI Frappe application with a powerful, conversational AI layer. It provides a single, robust API endpoint that can understand user questions and intelligently route them to the best tool - a curated knowledge bank, a direct database query, a semantic vector search, or a direct LLM fallback - to provide accurate, context-aware answers.
 
 The system is designed for multi-turn conversations, automatically managing chat history to understand follow-up questions. It features **asynchronous processing via RabbitMQ workers**, **voice input/output support**, and **dynamic configuration management** for seamless integration with TAP LMS.
 
@@ -32,22 +32,31 @@ Current deployment topology:
 
 **TAP AI** is a conversational AI engine built on top of the Frappe framework. It intelligently routes user queries to specialized execution engines:
 
+- **Knowledge Bank Tool**: For curated TAP responses, greetings, short support phrases, and high-confidence conversational matches
 - **Text-to-SQL Engine**: For factual, database-specific queries
 - **Vector RAG Engine**: For conceptual, semantic, and summarization queries
+- **Direct LLM Tool**: For open-ended conversation when no knowledge-bank entry fits
 - **RabbitMQ Worker Architecture**: Asynchronous processing for scalability
 - **Voice Processing**: STT → LLM → TTS pipeline for voice queries
 
 **Key Features:**
 - Intelligent routing using LLMs
 - Multi-turn conversation support with history management
-- Hybrid query execution (SQL + Vector Search)
-- Automatic fallback mechanisms
+- Hybrid query execution (Knowledge Bank + SQL + Vector Search + Direct LLM)
+- Automatic fallback mechanisms with confidence thresholds
 - Telegram bot integration
 - Rate limiting and authentication built-in
 - Voice input/output support via Telegram
 - Asynchronous processing with RabbitMQ
 - Dynamic configuration for TAP LMS integration
 - Admin-controlled DocType exclusion system
+
+## 🛠 Recent Updates
+
+- Added a hybrid Knowledge Bank verifier: the system now probes the best KB candidate and asks the LLM to verify whether the candidate appropriately answers the user's query; the LLM either returns the KB response (optionally lightly personalized) or generates a fresh answer. This reduces false positives (e.g., distinguishing "who are you" vs "how are you").
+- Router now uses the hybrid verifier for `knowledge_bank` routed queries.
+- DocType event hooks invalidate the KB cache on insert/update/delete to keep the KB context fresh.
+- A verifier LLM cache is used to reduce latency for repeated verification queries (TTL configurable).
 
 **Technology Stack:**
 - **Backend**: Python 3.10+
@@ -72,10 +81,12 @@ The system's intelligence lies in its central router, which acts as a decision-m
 
 1. **Intelligent Routing:** An LLM analyzes the user's query to determine its intent.
 2. **Tool Selection:**
-   - For factual, specific questions (e.g., "list all...", "how many..."), it selects the **Text-to-SQL Engine**.
-   - For conceptual, open-ended, or summarization questions (e.g., "summarize...", "explain..."), it selects the **Vector RAG Engine**.
-3. **Execution & Fallback:** The chosen engine executes the query. If it fails to produce a satisfactory answer, the system automatically falls back to the Vector RAG engine as a safety net.
-4. **Answer Synthesis:** The retrieved data is passed to an LLM, which generates a final, human-readable answer.
+  - For short, curated conversational intents that match the TAP response bank, it selects the **Knowledge Bank Tool**.
+  - For factual, specific questions (e.g., "list all...", "how many..."), it selects the **Text-to-SQL Engine**.
+  - For conceptual, open-ended, or summarization questions (e.g., "summarize...", "explain..."), it selects the **Vector RAG Engine**.
+  - For open-ended supportive conversation that does not fit the knowledge bank, it selects the **Direct LLM Tool**.
+3. **Execution & Fallback:** The chosen tool executes the query. If the knowledge bank misses or returns a low-confidence match, the system falls back to the Direct LLM tool. If SQL fails to produce a satisfactory answer, the system automatically falls back to the Vector RAG engine as a safety net.
+4. **Answer Synthesis:** The retrieved data or direct response is returned as a final, human-readable answer.
 
 ### System Flow Diagram
 
@@ -101,8 +112,10 @@ graph TD
 
     subgraph "Services"
         Router["services/router.py<br><b>Intelligent Router</b>"]
+      KB["services/direct_response_bank.py<br><b>Knowledge Bank</b>"]
         SQL["services/sql_answerer.py<br><b>SQL Engine</b>"]
         RAG["services/rag_answerer.py<br><b>RAG Engine</b>"]
+      Direct["services/direct_answerer.py<br><b>Direct LLM</b>"]
     end
 
     subgraph "Data Layer"
@@ -119,8 +132,12 @@ graph TD
     
     STTWorker -->|Transcribed Text| RabbitMQ
     LLMWorker -->|Route Query| Router
+    Router -->|Curated Match| KB
+    KB -->|High confidence| Router
+    KB -->|Miss / low confidence| Direct
     Router -->|Factual| SQL
     Router -->|Conceptual| RAG
+    Router -->|Open-ended support| Direct
     
     SQL -->|SQL Query| PostgresDB
     RAG -->|Vector Search| PineconeDB
@@ -149,6 +166,18 @@ graph TD
 #### Vector RAG Engine: From Query to Rich Context
 
 This engine excels at conceptual queries by retrieving semantically relevant documents.
+
+#### Knowledge Bank Tool: From Curated Phrase to Direct Answer
+
+This tool handles short, high-confidence conversational intents like greetings, acknowledgements, simple help requests, identity questions, and other curated TAP response patterns.
+
+```mermaid
+graph TD
+  A[User Query] --> B[Normalize and score against curated entries]
+  B --> C{Confidence threshold met?}
+  C -->|Yes| D[Return stored TAP response]
+  C -->|No| E[Fallback to Direct LLM]
+```
 
 ```mermaid
 graph TD

@@ -17,6 +17,7 @@ import frappe
 from langchain_openai import ChatOpenAI
 
 from tap_ai.infra.config import get_config
+from tap_ai.services.prompt_bank import get_system_message_for_context
 from tap_ai.services.pinecone_store import (
     search_auto_namespaces,
     get_db_columns_for_doctype,
@@ -393,6 +394,11 @@ def _synthesize_answer(
     synthesis_max_tokens = max(180, _to_int(get_config("rag_synthesis_max_tokens") or 500, 500))
     synthesis_model = get_config("rag_synthesis_model") or "gpt-4o-mini"
 
+    try:
+        persona = get_system_message_for_context(user_profile=user_profile)
+    except Exception:
+        persona = ""
+
     if user_profile and user_profile.get("name"):
         system_prompt = f"""You are a helpful educational AI assistant.
 
@@ -405,6 +411,8 @@ Use friendly, age-appropriate language.
         system_prompt = """You are a helpful educational AI assistant."""
 
     messages = [["system", system_prompt]]
+    if persona:
+        messages.append(["system", persona])
     for msg in history[-synthesis_history_turns:]:
         messages.append([msg["role"], msg["content"]])
     messages.append(["user", f"CONTEXT:\n{context_text}\n\nAnswer this question:\n{query}"])

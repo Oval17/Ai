@@ -13,6 +13,7 @@ from langchain_openai import ChatOpenAI
 
 from tap_ai.infra.config import get_config
 from tap_ai.infra.sql_catalog import load_schema
+from tap_ai.services.prompt_bank import get_system_message_for_context
 
 
 # --- LLM Initialization ---
@@ -43,7 +44,12 @@ def _build_enriched_schema_prompt(user_profile: Optional[Dict] = None) -> str:
     allowed_joins = schema.get("allowed_joins", [])
     guardrails = schema.get("guardrails", [])
     
-    prompt_parts = ["DATABASE SCHEMA:\n"]
+    # Prepend persona system prompt to bias SQL assistant behavior
+    try:
+        persona = get_system_message_for_context(user_profile=user_profile)
+        prompt_parts = [f"SYSTEM_PERSONA:\n{persona}\n\n", "DATABASE SCHEMA:\n"]
+    except Exception:
+        prompt_parts = ["DATABASE SCHEMA:\n"]
     
     # Add tables
     for table_name, table_info in tables.items():
@@ -73,11 +79,9 @@ def _build_enriched_schema_prompt(user_profile: Optional[Dict] = None) -> str:
         prompt_parts.append("\n\nGUARDRAILS:")
         for rule in guardrails:
             prompt_parts.append(f"- {rule}")
-    
-    # Add user context hints if available
+
+        # Add user context hints if available
     if user_profile:
-        prompt_parts.append("\n\nUSER CONTEXT:")
-        
         if user_profile.get('type'):
             prompt_parts.append(f"- User Type: {user_profile['type']}")
         
@@ -149,6 +153,11 @@ def _generate_sql_query(
         Generated SQL query string  
     """  
     llm = _llm()  
+
+    try:
+        persona = get_system_message_for_context(user_profile=user_profile)
+    except Exception:
+        persona = ""
       
     # Build user prompt with context hints  
     user_prompt_parts = [  
@@ -186,10 +195,12 @@ def _generate_sql_query(
     user_prompt = "\n".join(user_prompt_parts)  
       
     try:  
-        resp = llm.invoke([  
-            ("system", SQL_GENERATION_PROMPT),  
-            ("user", user_prompt)  
-        ])  
+        messages = [("system", SQL_GENERATION_PROMPT)]
+        if persona:
+            messages.append(("system", persona))
+        messages.append(("user", user_prompt))
+
+        resp = llm.invoke(messages)  
         sql = getattr(resp, "content", "").strip()  
           
         # Clean up the SQL  

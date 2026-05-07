@@ -23,6 +23,8 @@ from tap_ai.infra.config import get_config
 from tap_ai.services.sql_answerer import answer_from_sql
 from tap_ai.services.rag_answerer import answer_from_pinecone
 from tap_ai.services.direct_answerer import answer_direct
+from tap_ai.services.direct_response_bank import lookup_direct_response, probe_direct_response_match
+from tap_ai.services.hybrid_kb_verifier import verify_and_respond as verify_kb_and_respond
 
 
 # ======================================================
@@ -34,12 +36,12 @@ def _llm(
     temperature: float = 0.0,
     max_tokens: int = 1500,
 ) -> ChatOpenAI:
-    from tap_ai.infra.llm_client import LLMClient  
-    return LLMClient.get_client(  
+    from tap_ai.infra.llm_client import LLMClient
+    return LLMClient.get_client(
         model=model or (get_config("primary_llm_model") or "gpt-4o-mini"),
         temperature=temperature,
         max_tokens=max_tokens,
-    )  
+    )
 
 
 def llm_invoke_cached(
@@ -93,19 +95,22 @@ def llm_invoke_cached(
 ROUTER_PROMPT = """You are a query routing expert.
 
 Choose ONE tool:
-1. text_to_sql – factual, structured data queries (list, count, show, filter)
-2. vector_search – conceptual, explanatory, summarization queries
-3. direct_llm – greetings, small talk, wellbeing/motivation guidance, conversational support
+1. knowledge_bank - curated TAP response phrases and support snippets from the TAP Response Knowledge doctype
+2. text_to_sql - factual, structured data queries (list, count, show, filter)
+3. vector_search - conceptual, explanatory, summarization queries
 
 Routing hints:
-- Use text_to_sql for explicit data lookup from platform tables
-- Use vector_search for semantic/content retrieval and summarization from indexed knowledge
-- Use direct_llm for social conversation and coaching-style guidance that does not require data retrieval
+- Use knowledge_bank for short conversational intents that match curated categories such as greetings, sign-offs, identity questions, TAP program explanations, simple acknowledgements, gibberish or emoji spam, request phrases, help or stuck replies, submission help, and motivational or support replies.
+- Use text_to_sql for explicit data lookup from platform tables.
+- Use vector_search for semantic/content retrieval and summarization from indexed knowledge.
+
+Important:
+- Do not choose direct_llm. If a knowledge-bank match is missing or below cutoff, the code will fall back to direct_llm automatically.
 
 Return ONLY JSON:
 {
-    "tool": "text_to_sql" or "vector_search" or "direct_llm",
-  "reason": "short explanation (<= 20 words)"
+    "tool": "knowledge_bank" or "text_to_sql" or "vector_search",
+    "reason": "short explanation (<= 20 words)"
 }
 """
 
@@ -118,26 +123,39 @@ def choose_tool(query: str, user_context: Optional[str] = None) -> str:
     prompt += "\n\nWhich tool should be used?"
 
     try:
+        # Debug: log a short snippet of the prompt so we can reproduce routing decisions
+        try:
+            print(f"> Router prompt snippet: {prompt[:400]!r}")
+        except Exception:
+            pass
+
+        messages = [("system", ROUTER_PROMPT), ("user", prompt)]
+
         content = llm_invoke_cached(
-            [("system", ROUTER_PROMPT), ("user", prompt)],
+            messages,
             model=get_config("primary_llm_model") or "gpt-4o-mini",
             temperature=0.0,
         )
+        # Debug: emit the raw LLM output so we can see why a tool was chosen in logs
+        try:
+            print(f"> Router LLM output: {str(content)[:1000]!r}")
+        except Exception:
+            pass
         content = content.replace("```json", "").replace("```", "").strip()
         data = json.loads(content)
         tool = data.get("tool")
         print(f"> Router Reason: {data.get('reason')}")
-        if tool in ("text_to_sql", "vector_search", "direct_llm"):
+        if tool in ("knowledge_bank", "text_to_sql", "vector_search"):
             return tool
     except Exception as e:
         frappe.log_error(f"Router failed: {e}")
 
-    print("> Router fallback → vector_search")
+    print("> Router fallback -> vector_search")
     return "vector_search"
 
 
 # ======================================================
-# FAILURE DETECTION 
+# FAILURE DETECTION
 # ======================================================
 
 def _is_failure(res: dict) -> bool:
@@ -174,7 +192,8 @@ def _with_meta(
     res: dict,
     original_query: str,
     primary: str,
-    fallback_used: bool
+    fallback_used: bool,
+    timing_ms: Optional[Dict[str, Any]] = None,
 ) -> dict:
     res.setdefault("metadata", {})
     res["metadata"].update({
@@ -182,6 +201,10 @@ def _with_meta(
         "primary_engine": primary,
         "fallback_used": fallback_used,
     })
+
+    if timing_ms:
+        res["metadata"].setdefault("timings_ms", {})
+        res["metadata"]["timings_ms"].update(timing_ms)
 
     if "routed_doctypes" in res:
         res["metadata"]["doctypes_used"] = res["routed_doctypes"]
@@ -203,6 +226,7 @@ def process_query(
 ) -> dict:
 
     chat_history = chat_history or []
+    process_start = time.perf_counter()
 
     # -------- Build user context string (for routing) --------
     user_context = None
@@ -223,13 +247,32 @@ def process_query(
         user_context = f"{user_context}\n{content_str}" if user_context else content_str
 
     # -------- Choose tool --------
+    routing_start = time.perf_counter()
     primary_tool = choose_tool(query, user_context)
+    routing_ms = int((time.perf_counter() - routing_start) * 1000)
     print(f"> Selected Primary Tool: {primary_tool}")
 
     fallback_used = False
     result = {}
 
     # -------- Execute --------
+    if primary_tool == "knowledge_bank":
+        # Hybrid approach: probe KB for best candidate, then ask LLM to verify/use it.
+        result = verify_kb_and_respond(
+            query=query,
+            user_profile=user_profile,
+            chat_history=chat_history,
+        )
+
+        processing_ms = int((time.perf_counter() - process_start) * 1000)
+        return _with_meta(
+            result,
+            query,
+            "knowledge_bank",
+            False,
+            timing_ms={"router": routing_ms, "processing_total": processing_ms},
+        )
+
     if primary_tool == "text_to_sql":
         result = answer_from_sql(
             query,
@@ -239,7 +282,7 @@ def process_query(
         )
 
         if _is_failure(result):
-            print("> SQL failure detected → Falling back to RAG")
+            print("> SQL failure detected â†’ Falling back to RAG")
             fallback_used = True
             interim = "Searching, please wait a few more seconds..."
             result = answer_from_pinecone(
@@ -250,13 +293,6 @@ def process_query(
             )
             result["interim_message"] = interim
 
-    elif primary_tool == "direct_llm":
-        result = answer_direct(
-            query=query,
-            user_profile=user_profile,
-            chat_history=chat_history,
-        )
-
     else:
         primary_tool = "vector_search"
         result = answer_from_pinecone(
@@ -266,7 +302,14 @@ def process_query(
             chat_history=chat_history
         )
 
-    return _with_meta(result, query, primary_tool, fallback_used)
+    processing_ms = int((time.perf_counter() - process_start) * 1000)
+    return _with_meta(
+        result,
+        query,
+        primary_tool,
+        fallback_used,
+        timing_ms={"router": routing_ms, "processing_total": processing_ms},
+    )
 
 
 # ======================================================
@@ -472,7 +515,7 @@ def cli(q: str, user_id: str = "default_user"):
     """
 
     print("\n" + "=" * 80)
-    print("TAP AI ROUTER – CLI")
+    print("TAP AI ROUTER â€“ CLI")
     print("=" * 80)
 
     history = _get_history_from_cache(user_id)

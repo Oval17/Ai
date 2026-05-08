@@ -24,7 +24,7 @@ from tap_ai.services.sql_answerer import answer_from_sql
 from tap_ai.services.rag_answerer import answer_from_pinecone
 from tap_ai.services.direct_answerer import answer_direct
 from tap_ai.services.direct_response_bank import lookup_direct_response, probe_direct_response_match
-from tap_ai.services.hybrid_kb_verifier import verify_and_respond as verify_kb_and_respond
+from tap_ai.services.single_pass_kb_router import verify_and_respond as verify_kb_and_respond
 
 
 # ======================================================
@@ -500,6 +500,8 @@ def cli(q: str, user_id: str = "default_user"):
     Bench CLI with resilient chat memory.
 
     Examples:
+
+    bench execute tap_ai.services.router.cli --kwargs "{'q':'👋','user_id':'user123'}"
 
     Turn 1:
     bench execute tap_ai.services.router.cli --kwargs "{'q':'list videos with basic difficulty','user_id':'user123'}"

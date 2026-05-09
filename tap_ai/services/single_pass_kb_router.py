@@ -135,12 +135,6 @@ def verify_and_respond(query: str, user_profile: Optional[Dict[str, Any]] = None
 
     # 3. Build the LLM Messages
     messages = []
-    try:
-        persona = get_system_message_for_context(user_profile=user_profile)
-        messages.append(("system", persona))
-    except Exception:
-        pass
-
     messages.append(("system", SINGLE_PASS_KB_PROMPT))
     
     if chat_history:

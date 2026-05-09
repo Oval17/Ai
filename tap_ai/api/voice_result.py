@@ -56,6 +56,7 @@ def voice_result(
 ):
     """
     Audio-focused result endpoint with 2-phase polling:
+    - phase=router: wait until routing is completed after transcription
     - phase=transcribe: wait until transcription is completed
     - phase=answer: reuse unified result polling until final answer
     """
@@ -64,6 +65,14 @@ def voice_result(
 
         # Phase 2: final answer (reuses existing unified long-poll logic)
         if phase == "answer":
+            return result(
+                request_id=request_id,
+                phase=phase,
+                wait_seconds=wait_seconds,
+                poll_interval_ms=poll_interval_ms,
+            )
+
+        if phase == "router":
             return result(
                 request_id=request_id,
                 phase=phase,

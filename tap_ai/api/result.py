@@ -236,10 +236,15 @@ def _normalize_router_result(data: dict, request_id: str) -> dict | None:
     out["answer_text"] = None
     out["router_decision"] = router_info
     
-    # Override timing_ms with router-specific timing from metadata
+    # Override timing_ms with router-specific timing from metadata.
+    # Prefer the explicit router timing, but fall back to alternate fields when needed.
     metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
     timings_ms = metadata.get("timings_ms") if isinstance(metadata.get("timings_ms"), dict) else {}
     router_timing = timings_ms.get("router")
+    if router_timing is None:
+        router_timing = metadata.get("router_timing_ms")
+    if router_timing is None:
+        router_timing = data.get("router_timing_ms")
     if router_timing is not None:
         out["timing_ms"] = router_timing
     

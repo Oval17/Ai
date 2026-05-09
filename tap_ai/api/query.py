@@ -108,7 +108,11 @@ def query():
 
         # Keep a bounded TTL for both request types.
         print(f"[Query API] Cache set OK: request_id={request_id}")
-        frappe.cache().set(request_id, json.dumps(state), ex=3600)
+        try:
+            frappe.cache().set(request_id, json.dumps(state), ex=3600)
+            print(f"[Query API] cache.set written: request_id={request_id} mode={state.get('mode')} ts={int(time.time())}")
+        except Exception as e:
+            print(f"[Query API] cache.set failed for {request_id}: {e}")
 
         if is_voice:
             payload = {

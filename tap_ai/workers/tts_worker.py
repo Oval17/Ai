@@ -1,6 +1,7 @@
 # tap_ai/workers/tts_worker.py
 
 import frappe
+import time
 import json
 import pika
 import os
@@ -71,6 +72,7 @@ def process_message(ch, method, properties, body):
     except Exception as e:
         print(f"[x] TTS failed for {request_id}: {str(e)}")
         frappe.cache().set(request_id, json.dumps({"status": "failed", "error": str(e)}))
+        print(f"[TTS Worker] cache.set: request_id={request_id} status=failed error={str(e)} ts={int(time.time())}")
 
     ch.basic_ack(delivery_tag=method.delivery_tag)
 

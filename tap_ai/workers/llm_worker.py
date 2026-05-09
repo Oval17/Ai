@@ -31,7 +31,11 @@ def _load_request_state(request_id: str) -> dict:
 
 
 def _save_request_state(request_id: str, state_dict: dict) -> None:
-    frappe.cache().set(request_id, json.dumps(state_dict))
+    try:
+        frappe.cache().set(request_id, json.dumps(state_dict))
+        print(f"[LLM Worker] cache.set: request_id={request_id} status={state_dict.get('status')} tool={state_dict.get('tool')} router_decision={state_dict.get('router_decision')} ts={int(time.time())}")
+    except Exception as e:
+        print(f"[LLM Worker] cache.set failed for {request_id}: {e}")
 
 
 def _resolve_result_tool(result: dict, fallback_tool: str) -> str:

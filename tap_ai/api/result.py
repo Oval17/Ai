@@ -305,9 +305,17 @@ def result(
         if not request_id:
             return _empty_result(request_id, error="Missing request_id")
 
-        cached = frappe.cache().get(request_id)
+        # Read cache and log payload for diagnostics
+        try:
+            cached = frappe.cache().get(request_id)
+        except Exception as e:
+            print(f"[result] Cache read error for {request_id}: {e}")
+            return _empty_result(request_id, error=f"Cache read error for {request_id}: {e}")
+
+        print(f"[result] cache_lookup: request_id={request_id} cached_type={type(cached).__name__} ts={int(time.time())}")
         data, error = _safe_load_cache_payload(cached)
         if error:
+            print(f"[result] cache payload invalid or missing for {request_id}: {error}")
             return _empty_result(request_id, error=f"No such request_id or unavailable state: {request_id}")
 
         if phase == "router":

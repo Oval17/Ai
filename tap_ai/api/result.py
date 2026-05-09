@@ -18,6 +18,10 @@ VECTOR_SEARCH_DONE_STATES = {
     "vector_search_failed",
 }
 
+ROUTER_DONE_STATES = {
+    "router_complete",
+}
+
 
 def _close_http_connection() -> None:
     try:
@@ -197,6 +201,43 @@ def _normalize_result(data: dict, request_id: str) -> dict:
     return out
 
 
+def _normalize_router_result(data: dict, request_id: str) -> dict | None:
+    """
+    Normalize router decision checkpoint.
+    Returns None if router phase is not complete.
+    """
+    router_info = data.get("router_decision") if isinstance(data.get("router_decision"), dict) else None
+    raw_status = data.get("status")
+
+    # Router is complete if router_decision info is present or status indicates router is done
+    if not router_info and raw_status not in ROUTER_DONE_STATES:
+        return None
+
+    if not router_info:
+        router_info = {
+            "status": "success",
+            "raw_status": raw_status,
+            "tool": data.get("tool"),
+        }
+
+    out = _normalize_result(data, request_id)
+    out["phase"] = "router"
+    out["phase_complete"] = True
+    # Next phase depends on tool chosen
+    tool = router_info.get("tool")
+    if tool == "vector_search":
+        out["next_phase"] = "search"
+    elif tool in ("text_to_sql", "knowledge_bank"):
+        out["next_phase"] = "answer"
+    else:
+        out["next_phase"] = "answer"
+    out["status"] = "processing"
+    out["answer"] = None
+    out["answer_text"] = None
+    out["router_decision"] = router_info
+    return out
+
+
 def _normalize_vector_search_result(data: dict, request_id: str) -> dict | None:
     vector_search = data.get("vector_search") if isinstance(data.get("vector_search"), dict) else None
     raw_status = data.get("status")
@@ -234,6 +275,7 @@ def result(
     """
     Result API: Fetch answer by request_id.
     Optional long-polling:
+    - phase=router: return routing decision state (text: after router, voice: after transcription + router)
     - phase=search: return vector-search completion state
     - phase=answer: return the final synthesized answer
     - wait_seconds: 0-55, or omit for auto (text: 8s, voice: 25s)
@@ -249,6 +291,43 @@ def result(
         data, error = _safe_load_cache_payload(cached)
         if error:
             return _empty_result(request_id, error=f"No such request_id or unavailable state: {request_id}")
+
+        if phase == "router":
+            is_voice = _is_voice_response(data, request_id)
+            wait_seconds = _resolve_wait_seconds(wait_seconds, is_voice=is_voice)
+            poll_interval_ms = _resolve_poll_interval_ms(poll_interval_ms, is_voice=is_voice)
+
+            if wait_seconds == 0:
+                router_out = _normalize_router_result(data, request_id)
+                if router_out:
+                    return router_out
+                out = _normalize_result(data, request_id)
+                out["phase"] = "router"
+                out["phase_complete"] = False
+                out["next_phase"] = "search" if data.get("tool") == "vector_search" else "answer"
+                return out
+
+            deadline = time.monotonic() + wait_seconds
+
+            while True:
+                router_out = _normalize_router_result(data, request_id)
+                if router_out:
+                    return router_out
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    out = _normalize_result(data, request_id)
+                    out["phase"] = "router"
+                    out["phase_complete"] = False
+                    out["next_phase"] = "search" if data.get("tool") == "vector_search" else "answer"
+                    return out
+
+                time.sleep(min(poll_interval_ms / 1000.0, remaining))
+
+                cached = frappe.cache().get(request_id)
+                data, error = _safe_load_cache_payload(cached)
+                if error:
+                    return _empty_result(request_id, error=f"No such request_id or unavailable state: {request_id}")
 
         if phase == "search":
             is_voice = _is_voice_response(data, request_id)

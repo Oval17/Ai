@@ -157,7 +157,12 @@ def _normalize_result(data: dict, request_id: str) -> dict:
     timings_ms = metadata.get("timings_ms") if isinstance(metadata.get("timings_ms"), dict) else {}
     timing_ms = data.get("timing_ms")
     if timing_ms is None:
-        timing_ms = timings_ms.get("direct_llm") or timings_ms.get("total")
+        timing_ms = (
+            timings_ms.get("stt")
+            or data.get("stt_timing_ms")
+            or timings_ms.get("direct_llm")
+            or timings_ms.get("total")
+        )
 
     fallback_reason = data.get("fallback_reason")
     if fallback_reason is None:

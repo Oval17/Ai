@@ -247,6 +247,10 @@ def process_message(ch, method, properties, body):
         # 1. Update status to provide real-time UI feedback
         state_dict = _load_request_state(request_id)
         state_dict["tool"] = primary_tool
+        state_dict["router_decision"] = {
+            "tool": primary_tool,
+            "status": "success",
+        }
         state_dict["status"] = "generating_answer"
         state_dict["session_id"] = session_id
         _save_request_state(request_id, state_dict)
@@ -283,6 +287,10 @@ def process_message(ch, method, properties, body):
             state_dict.update({
                 "status": "vector_search_success",
                 "tool": "vector_search",
+                "router_decision": {
+                    "tool": "vector_search",
+                    "status": "success",
+                },
                 "vector_search": {
                     "status": "success",
                     "raw_status": "vector_search_success",
@@ -344,6 +352,10 @@ def process_message(ch, method, properties, body):
                     "session_id": session_id,
                     "metadata": metadata,
                     "tool": resolved_tool,
+                    "router_decision": {
+                        "tool": resolved_tool,
+                        "status": "success",
+                    },
                     "timing_ms": metadata.get("timings_ms", {}).get("total"),
                 })
                 frappe.cache().set(request_id, json.dumps(state_dict))
@@ -374,6 +386,10 @@ def process_message(ch, method, properties, body):
                     "history": chat_history[-10:],
                     "metadata": metadata,
                     "tool": resolved_tool,
+                    "router_decision": {
+                        "tool": resolved_tool,
+                        "status": "success",
+                    },
                     "timing_ms": metadata.get("timings_ms", {}).get("total"),
                 })
                 state_dict.setdefault("metadata", {})
@@ -394,6 +410,10 @@ def process_message(ch, method, properties, body):
                 "history": chat_history[-10:],
                 "metadata": metadata,
                 "tool": resolved_tool,
+                "router_decision": {
+                    "tool": resolved_tool,
+                    "status": "success",
+                },
                 "timing_ms": metadata.get("timings_ms", {}).get("total"),
             })
             frappe.cache().set(request_id, json.dumps(state_dict))

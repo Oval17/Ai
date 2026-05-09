@@ -104,13 +104,9 @@ Routing hints:
 - Use text_to_sql for explicit data lookup from platform tables.
 - Use vector_search for semantic/content retrieval and summarization from indexed knowledge.
 
-Important:
-- Do not choose direct_llm. If a knowledge-bank match is missing or below cutoff, the code will fall back to direct_llm automatically.
-
 Return ONLY JSON:
 {
     "tool": "knowledge_bank" or "text_to_sql" or "vector_search",
-    "reason": "short explanation (<= 20 words)"
 }
 """
 
@@ -514,6 +510,9 @@ def cli(q: str, user_id: str = "default_user"):
     bench execute tap_ai.services.router.cli --kwargs "{'q':'list all the activities present','user_id':'user123'}"
 
     bench execute tap_ai.services.router.cli --kwargs "{'q':'Find a video about financial literacy and goal setting and summarize its key points','user_id':'user123'}"
+
+    bench execute tap_ai.services.router.cli --kwargs "{'q':'what is budget','user_id':'user123'}"
+    
     """
 
     print("\n" + "=" * 80)

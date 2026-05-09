@@ -10,7 +10,7 @@ MIN_POLL_INTERVAL_MS = 100
 MAX_POLL_INTERVAL_MS = 2000
 
 AUTO_TEXT_WAIT_SECONDS = 8
-AUTO_VOICE_WAIT_SECONDS = 25
+AUTO_VOICE_WAIT_SECONDS = 9
 AUTO_TEXT_POLL_INTERVAL_MS = 300
 AUTO_VOICE_POLL_INTERVAL_MS = 500
 VECTOR_SEARCH_DONE_STATES = {
@@ -235,6 +235,14 @@ def _normalize_router_result(data: dict, request_id: str) -> dict | None:
     out["answer"] = None
     out["answer_text"] = None
     out["router_decision"] = router_info
+    
+    # Override timing_ms with router-specific timing from metadata
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    timings_ms = metadata.get("timings_ms") if isinstance(metadata.get("timings_ms"), dict) else {}
+    router_timing = timings_ms.get("router")
+    if router_timing is not None:
+        out["timing_ms"] = router_timing
+    
     return out
 
 

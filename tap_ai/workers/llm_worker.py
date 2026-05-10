@@ -333,7 +333,12 @@ def process_message(ch, method, properties, body):
             return
 
         # 4. Run the existing router logic for SQL/direct flows
-        out = process_query(query=query, chat_history=chat_history, voice_mode=is_voice)
+        out = process_query(
+            query=query,
+            chat_history=chat_history,
+            voice_mode=is_voice,
+            primary_tool=primary_tool,
+        )
         answer = out.get("answer", "")
         resolved_tool = _resolve_result_tool(out, primary_tool)
 

@@ -23,7 +23,7 @@ from tap_ai.infra.config import get_config
 from tap_ai.services.sql_answerer import answer_from_sql
 from tap_ai.services.rag_answerer import answer_from_pinecone
 from tap_ai.services.direct_answerer import answer_direct
-from tap_ai.services.direct_response_bank import lookup_direct_response, probe_direct_response_match
+from tap_ai.services.direct_response_bank import lookup_direct_response, lookup_exact_direct_response, probe_direct_response_match
 from tap_ai.services.single_pass_kb_router import verify_and_respond as verify_kb_and_respond
 
 
@@ -219,6 +219,7 @@ def process_query(
     chat_history: Optional[List[Dict[str, str]]] = None,
     context: Optional[Dict[str, Any]] = None,
     voice_mode: bool = False,
+    primary_tool: Optional[str] = None,
 ) -> dict:
 
     chat_history = chat_history or []
@@ -243,9 +244,12 @@ def process_query(
         user_context = f"{user_context}\n{content_str}" if user_context else content_str
 
     # -------- Choose tool --------
-    routing_start = time.perf_counter()
-    primary_tool = choose_tool(query, user_context)
-    routing_ms = int((time.perf_counter() - routing_start) * 1000)
+    if primary_tool is None:
+        routing_start = time.perf_counter()
+        primary_tool = choose_tool(query, user_context)
+        routing_ms = int((time.perf_counter() - routing_start) * 1000)
+    else:
+        routing_ms = 0
     print(f"> Selected Primary Tool: {primary_tool}")
 
     fallback_used = False
@@ -253,12 +257,19 @@ def process_query(
 
     # -------- Execute --------
     if primary_tool == "knowledge_bank":
-        # Hybrid approach: probe KB for best candidate, then ask LLM to verify/use it.
-        result = verify_kb_and_respond(
+        exact_result = lookup_exact_direct_response(
             query=query,
             user_profile=user_profile,
-            chat_history=chat_history,
         )
+        if exact_result:
+            result = exact_result
+        else:
+            # Hybrid approach: probe KB for best candidate, then ask LLM to verify/use it.
+            result = verify_kb_and_respond(
+                query=query,
+                user_profile=user_profile,
+                chat_history=chat_history,
+            )
 
         processing_ms = int((time.perf_counter() - process_start) * 1000)
         return _with_meta(

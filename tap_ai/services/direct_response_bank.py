@@ -363,6 +363,52 @@ def lookup_direct_response(
 	}
 
 
+def lookup_exact_direct_response(
+	query: str,
+	user_profile: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+	"""Return a knowledge-bank response only when the query matches exactly after normalization."""
+	start = time.perf_counter()
+	entries = get_direct_response_entries()
+	query_norm = normalize_text(query)
+
+	for entry in entries:
+		if not entry or not entry.get("is_active", 1):
+			continue
+
+		for candidate in _entry_candidates(entry):
+			if normalize_text(candidate) != query_norm:
+				continue
+
+			answer = _render_response(entry.get("response", ""), user_profile=user_profile).strip()
+			timing_ms = int((time.perf_counter() - start) * 1000)
+			return {
+				"question": query,
+				"answer": answer,
+				"response_type": "knowledge_bank",
+				"user_context": "personalized" if user_profile else "general",
+				"metadata": {
+					"timings_ms": {
+						"knowledge_bank": timing_ms,
+						"processing_total": timing_ms,
+					},
+					"answer_source": "knowledge_bank_exact",
+					"knowledge_bank": {
+						"doctype": KB_DOCTYPE,
+						"name": entry.get("name"),
+						"title": entry.get("title"),
+						"category": entry.get("category"),
+						"subcategory": entry.get("subcategory"),
+						"student_query": entry.get("student_query"),
+						"matched_query": candidate,
+						"match_score": 1.0,
+					},
+				},
+			}
+
+	return None
+
+
 def get_entries_for_category(category: str, force_refresh: bool = False) -> List[Dict[str, Any]]:
 	"""Return KB entries for a specific category.
 

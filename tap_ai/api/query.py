@@ -6,6 +6,20 @@ from tap_ai.services.ratelimit import check_rate_limit
 from tap_ai.utils.mq import publish_to_queue, MQUnavailableError, MQPublishError
 
 
+def _close_http_connection() -> None:
+    try:
+        response_headers = getattr(frappe.local, "response_headers", None)
+        if response_headers is None:
+            frappe.local.response_headers = []
+            response_headers = frappe.local.response_headers
+
+        header = ("Connection", "close")
+        if header not in response_headers:
+            response_headers.append(header)
+    except Exception:
+        pass
+
+
 def _extract_api_key() -> str | None:
     auth = frappe.get_request_header("Authorization") or ""
     if not auth.lower().startswith("token "):
@@ -94,7 +108,11 @@ def query():
 
         # Keep a bounded TTL for both request types.
         print(f"[Query API] Cache set OK: request_id={request_id}")
-        frappe.cache().set(request_id, json.dumps(state), ex=3600)
+        try:
+            frappe.cache().set(request_id, json.dumps(state), ex=3600)
+            print(f"[Query API] cache.set written: request_id={request_id} mode={state.get('mode')} ts={int(time.time())}")
+        except Exception as e:
+            print(f"[Query API] cache.set failed for {request_id}: {e}")
 
         if is_voice:
             payload = {
@@ -140,3 +158,5 @@ def query():
             pass
         frappe.local.response["http_status_code"] = 500
         frappe.throw("An internal error occurred while processing your request.")
+    finally:
+        _close_http_connection()

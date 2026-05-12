@@ -31,7 +31,11 @@ def _load_request_state(request_id: str) -> dict:
 
 
 def _save_request_state(request_id: str, state_dict: dict) -> None:
-    frappe.cache().set(request_id, json.dumps(state_dict))
+    try:
+        frappe.cache().set(request_id, json.dumps(state_dict))
+        print(f"[LLM Worker] cache.set: request_id={request_id} status={state_dict.get('status')} tool={state_dict.get('tool')} router_decision={state_dict.get('router_decision')} ts={int(time.time())}")
+    except Exception as e:
+        print(f"[LLM Worker] cache.set failed for {request_id}: {e}")
 
 
 def _resolve_result_tool(result: dict, fallback_tool: str) -> str:
@@ -52,11 +56,17 @@ def _apply_end_to_end_timing(state_dict: dict, metadata: dict) -> dict:
     total_e2e_ms = int(time.time() * 1000) - int(started_at_ms)
     timings_ms = dict(metadata.get("timings_ms") or {})
     processing_ms = timings_ms.get("processing_total") or timings_ms.get("knowledge_bank") or timings_ms.get("direct_llm") or timings_ms.get("total")
+    stt_ms = state_dict.get("stt_timing_ms") or timings_ms.get("stt") or 0
+    router_ms = state_dict.get("router_timing_ms") or timings_ms.get("router_precheck") or 0
 
     timings_ms["end_to_end"] = total_e2e_ms
-    timings_ms["queue_wait"] = max(total_e2e_ms - int(processing_ms or 0), 0)
+    timings_ms["queue_wait"] = max(total_e2e_ms - int(processing_ms or 0) - int(stt_ms or 0) - int(router_ms or 0), 0)
     if processing_ms is not None:
         timings_ms["processing"] = int(processing_ms)
+    if stt_ms:
+        timings_ms["stt"] = int(stt_ms)
+    if router_ms:
+        timings_ms["router_precheck"] = int(router_ms)
     timings_ms["total"] = total_e2e_ms
 
     metadata = dict(metadata)
@@ -239,7 +249,9 @@ def process_message(ch, method, properties, body):
         ch.basic_ack(delivery_tag=method.delivery_tag)
         return
 
+    routing_start = time.perf_counter()
     primary_tool = choose_tool(query)
+    router_ms = int((time.perf_counter() - routing_start) * 1000)
 
     print(f"\n[*] [LLM Worker] Picked up task: {request_id} | Query: '{query}' | Session: {session_id} | Tool: {primary_tool}")
 
@@ -247,8 +259,16 @@ def process_message(ch, method, properties, body):
         # 1. Update status to provide real-time UI feedback
         state_dict = _load_request_state(request_id)
         state_dict["tool"] = primary_tool
+        state_dict["router_timing_ms"] = router_ms
+        state_dict["router_decision"] = {
+            "tool": primary_tool,
+            "status": "success",
+        }
         state_dict["status"] = "generating_answer"
         state_dict["session_id"] = session_id
+        state_dict.setdefault("metadata", {})
+        state_dict["metadata"].setdefault("timings_ms", {})
+        state_dict["metadata"]["timings_ms"]["router_precheck"] = router_ms
         _save_request_state(request_id, state_dict)
 
         # 2. Fetch history using your existing router helper
@@ -283,6 +303,10 @@ def process_message(ch, method, properties, body):
             state_dict.update({
                 "status": "vector_search_success",
                 "tool": "vector_search",
+                "router_decision": {
+                    "tool": "vector_search",
+                    "status": "success",
+                },
                 "vector_search": {
                     "status": "success",
                     "raw_status": "vector_search_success",
@@ -309,7 +333,12 @@ def process_message(ch, method, properties, body):
             return
 
         # 4. Run the existing router logic for SQL/direct flows
-        out = process_query(query=query, chat_history=chat_history, voice_mode=is_voice)
+        out = process_query(
+            query=query,
+            chat_history=chat_history,
+            voice_mode=is_voice,
+            primary_tool=primary_tool,
+        )
         answer = out.get("answer", "")
         resolved_tool = _resolve_result_tool(out, primary_tool)
 
@@ -344,6 +373,10 @@ def process_message(ch, method, properties, body):
                     "session_id": session_id,
                     "metadata": metadata,
                     "tool": resolved_tool,
+                    "router_decision": {
+                        "tool": resolved_tool,
+                        "status": "success",
+                    },
                     "timing_ms": metadata.get("timings_ms", {}).get("total"),
                 })
                 frappe.cache().set(request_id, json.dumps(state_dict))
@@ -374,6 +407,10 @@ def process_message(ch, method, properties, body):
                     "history": chat_history[-10:],
                     "metadata": metadata,
                     "tool": resolved_tool,
+                    "router_decision": {
+                        "tool": resolved_tool,
+                        "status": "success",
+                    },
                     "timing_ms": metadata.get("timings_ms", {}).get("total"),
                 })
                 state_dict.setdefault("metadata", {})
@@ -394,6 +431,10 @@ def process_message(ch, method, properties, body):
                 "history": chat_history[-10:],
                 "metadata": metadata,
                 "tool": resolved_tool,
+                "router_decision": {
+                    "tool": resolved_tool,
+                    "status": "success",
+                },
                 "timing_ms": metadata.get("timings_ms", {}).get("total"),
             })
             frappe.cache().set(request_id, json.dumps(state_dict))

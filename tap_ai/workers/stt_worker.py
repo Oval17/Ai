@@ -5,6 +5,7 @@ import json
 import pika
 import requests
 import os
+import time
 import uuid
 import traceback
 from urllib.parse import urlparse
@@ -48,6 +49,7 @@ def process_message(ch, method, properties, body):
     user_id = payload.get("user_id")
     input_path = None
     response = None
+    stt_started_at_ms = int(time.time() * 1000)
 
     print(f"\n[*] [STT Worker] Processing {request_id} from {audio_url}")
 
@@ -85,8 +87,12 @@ def process_message(ch, method, properties, body):
         state_dict.update({
             "status": "transcribed",
             "transcribed_text": text,
-            "language": language
+            "language": language,
+            "stt_timing_ms": int(time.time() * 1000) - stt_started_at_ms,
         })
+        state_dict.setdefault("metadata", {})
+        state_dict["metadata"].setdefault("timings_ms", {})
+        state_dict["metadata"]["timings_ms"]["stt"] = state_dict["stt_timing_ms"]
         frappe.cache().set(request_id, json.dumps(state_dict))
 
         # Forward to LLM Worker

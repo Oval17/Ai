@@ -14,6 +14,7 @@ import json
 import time
 import hashlib
 import uuid
+import re
 from typing import Dict, Any, List, Optional
 
 import frappe
@@ -23,8 +24,8 @@ from tap_ai.infra.config import get_config
 from tap_ai.services.sql_answerer import answer_from_sql
 from tap_ai.services.rag_answerer import answer_from_pinecone
 from tap_ai.services.direct_answerer import answer_direct
-from tap_ai.services.direct_response_bank import lookup_direct_response, probe_direct_response_match
-from tap_ai.services.hybrid_kb_verifier import verify_and_respond as verify_kb_and_respond
+from tap_ai.services.direct_response_bank import lookup_direct_response, lookup_exact_direct_response, probe_direct_response_match
+from tap_ai.services.single_pass_kb_router import verify_and_respond as verify_kb_and_respond
 
 
 # ======================================================
@@ -104,18 +105,35 @@ Routing hints:
 - Use text_to_sql for explicit data lookup from platform tables.
 - Use vector_search for semantic/content retrieval and summarization from indexed knowledge.
 
-Important:
-- Do not choose direct_llm. If a knowledge-bank match is missing or below cutoff, the code will fall back to direct_llm automatically.
-
 Return ONLY JSON:
 {
     "tool": "knowledge_bank" or "text_to_sql" or "vector_search",
-    "reason": "short explanation (<= 20 words)"
 }
 """
 
+FAST_SQL_PATTERNS = re.compile(r"\b(list|count|how many|show me all|filter)\b", re.I)
+FAST_KB_PATTERNS = re.compile(r"^(hi|hello|who are you|thanks|thank you|bye)\b", re.I)
+
+
+def _fast_route(query: str) -> Optional[str]:
+    q = (query or "").strip()
+    if not q:
+        return None
+
+    if FAST_KB_PATTERNS.match(q):
+        return "knowledge_bank"
+
+    if FAST_SQL_PATTERNS.search(q):
+        return "text_to_sql"
+
+    return None
+
 
 def choose_tool(query: str, user_context: Optional[str] = None) -> str:
+    fast_tool = _fast_route(query)
+    if fast_tool:
+        return fast_tool
+
     prompt = f"USER QUESTION:\n{query}"
     if user_context:
         prompt = f"USER CONTEXT:\n{user_context}\n\n{prompt}"
@@ -223,6 +241,7 @@ def process_query(
     chat_history: Optional[List[Dict[str, str]]] = None,
     context: Optional[Dict[str, Any]] = None,
     voice_mode: bool = False,
+    primary_tool: Optional[str] = None,
 ) -> dict:
 
     chat_history = chat_history or []
@@ -247,9 +266,12 @@ def process_query(
         user_context = f"{user_context}\n{content_str}" if user_context else content_str
 
     # -------- Choose tool --------
-    routing_start = time.perf_counter()
-    primary_tool = choose_tool(query, user_context)
-    routing_ms = int((time.perf_counter() - routing_start) * 1000)
+    if primary_tool is None:
+        routing_start = time.perf_counter()
+        primary_tool = choose_tool(query, user_context)
+        routing_ms = int((time.perf_counter() - routing_start) * 1000)
+    else:
+        routing_ms = 0
     print(f"> Selected Primary Tool: {primary_tool}")
 
     fallback_used = False
@@ -257,12 +279,19 @@ def process_query(
 
     # -------- Execute --------
     if primary_tool == "knowledge_bank":
-        # Hybrid approach: probe KB for best candidate, then ask LLM to verify/use it.
-        result = verify_kb_and_respond(
+        exact_result = lookup_exact_direct_response(
             query=query,
             user_profile=user_profile,
-            chat_history=chat_history,
         )
+        if exact_result:
+            result = exact_result
+        else:
+            # Hybrid approach: probe KB for best candidate, then ask LLM to verify/use it.
+            result = verify_kb_and_respond(
+                query=query,
+                user_profile=user_profile,
+                chat_history=chat_history,
+            )
 
         processing_ms = int((time.perf_counter() - process_start) * 1000)
         return _with_meta(
@@ -317,6 +346,7 @@ def process_query(
 # ======================================================
 
 CHAT_HISTORY_TABLE = get_config("chat_history_db_table") or "tabAIChatHistory"
+_CHAT_HISTORY_TABLE_ENSURED = False
 
 
 def _cache_key(user_id: str, session_id: Optional[str] = None) -> str:
@@ -324,7 +354,12 @@ def _cache_key(user_id: str, session_id: Optional[str] = None) -> str:
 
 
 def _ensure_chat_history_table_exists():
+    global _CHAT_HISTORY_TABLE_ENSURED
+
     if not get_config("enable_db_history"):
+        return
+
+    if _CHAT_HISTORY_TABLE_ENSURED:
         return
 
     try:
@@ -342,6 +377,7 @@ def _ensure_chat_history_table_exists():
             """
         )
         frappe.db.commit()
+        _CHAT_HISTORY_TABLE_ENSURED = True
     except Exception as e:
         frappe.log_error(f"Chat history table creation failed: {e}", "tap_ai.services.router")
 
@@ -501,6 +537,8 @@ def cli(q: str, user_id: str = "default_user"):
 
     Examples:
 
+    bench execute tap_ai.services.router.cli --kwargs "{'q':'👋','user_id':'user123'}"
+
     Turn 1:
     bench execute tap_ai.services.router.cli --kwargs "{'q':'list videos with basic difficulty','user_id':'user123'}"
 
@@ -512,6 +550,9 @@ def cli(q: str, user_id: str = "default_user"):
     bench execute tap_ai.services.router.cli --kwargs "{'q':'list all the activities present','user_id':'user123'}"
 
     bench execute tap_ai.services.router.cli --kwargs "{'q':'Find a video about financial literacy and goal setting and summarize its key points','user_id':'user123'}"
+
+    bench execute tap_ai.services.router.cli --kwargs "{'q':'what is budget','user_id':'user123'}"
+    
     """
 
     print("\n" + "=" * 80)

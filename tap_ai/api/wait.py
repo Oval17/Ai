@@ -38,13 +38,26 @@ def delay(delay_seconds: int | None = None):
     4. Ask next question
     """
     delay_seconds = _to_int(delay_seconds, default=10, min_value=0, max_value=MAX_DELAY_SECONDS)
-    
-    if delay_seconds > 0:
-        time.sleep(delay_seconds)
-    
-    return {
-        "success": True,
-        "waited_seconds": delay_seconds,
-    }
+
+    # Logging for webhook diagnostics (caller, params, timestamp)
+    try:
+        caller = getattr(frappe.local, "request_ip", None) or (frappe.local.request.environ.get('REMOTE_ADDR') if getattr(frappe.local, 'request', None) else None)
+    except Exception:
+        caller = None
+    print(f"> Webhook delay called: caller={caller} delay_seconds={delay_seconds} ts={int(time.time())}")
+
+    waited = 0
+    try:
+        if delay_seconds > 0:
+            # Use sleep but guard against interruptions — always return a stable JSON
+            time.sleep(delay_seconds)
+            waited = delay_seconds
+    except Exception as e:
+        print(f"> Webhook delay interrupted for caller={caller}: {e}")
+        # continue to return a structured payload
+
+    resp = {"success": True, "waited_seconds": waited}
+    print(f"> Webhook delay returning: caller={caller} payload={resp} ts={int(time.time())}")
+    return resp
 
 

@@ -10,13 +10,31 @@ MIN_POLL_INTERVAL_MS = 100
 MAX_POLL_INTERVAL_MS = 2000
 
 AUTO_TEXT_WAIT_SECONDS = 8
-AUTO_VOICE_WAIT_SECONDS = 25
+AUTO_VOICE_WAIT_SECONDS = 9
 AUTO_TEXT_POLL_INTERVAL_MS = 300
 AUTO_VOICE_POLL_INTERVAL_MS = 500
 VECTOR_SEARCH_DONE_STATES = {
     "vector_search_success",
     "vector_search_failed",
 }
+
+ROUTER_DONE_STATES = {
+    "router_complete",
+}
+
+
+def _close_http_connection() -> None:
+    try:
+        response_headers = getattr(frappe.local, "response_headers", None)
+        if response_headers is None:
+            frappe.local.response_headers = []
+            response_headers = frappe.local.response_headers
+
+        header = ("Connection", "close")
+        if header not in response_headers:
+            response_headers.append(header)
+    except Exception:
+        pass
 
 
 def _to_int(value, default: int, min_value: int, max_value: int) -> int:
@@ -139,7 +157,12 @@ def _normalize_result(data: dict, request_id: str) -> dict:
     timings_ms = metadata.get("timings_ms") if isinstance(metadata.get("timings_ms"), dict) else {}
     timing_ms = data.get("timing_ms")
     if timing_ms is None:
-        timing_ms = timings_ms.get("direct_llm") or timings_ms.get("total")
+        timing_ms = (
+            timings_ms.get("stt")
+            or data.get("stt_timing_ms")
+            or timings_ms.get("direct_llm")
+            or timings_ms.get("total")
+        )
 
     fallback_reason = data.get("fallback_reason")
     if fallback_reason is None:
@@ -183,6 +206,56 @@ def _normalize_result(data: dict, request_id: str) -> dict:
     return out
 
 
+def _normalize_router_result(data: dict, request_id: str) -> dict | None:
+    """
+    Normalize router decision checkpoint.
+    Returns None if router phase is not complete.
+    """
+    router_info = data.get("router_decision") if isinstance(data.get("router_decision"), dict) else None
+    raw_status = data.get("status")
+
+    # Router is complete if router_decision info is present or status indicates router is done
+    if not router_info and raw_status not in ROUTER_DONE_STATES:
+        return None
+
+    if not router_info:
+        router_info = {
+            "status": "success",
+            "raw_status": raw_status,
+            "tool": data.get("tool"),
+        }
+
+    out = _normalize_result(data, request_id)
+    out["phase"] = "router"
+    out["phase_complete"] = True
+    # Next phase depends on tool chosen
+    tool = router_info.get("tool")
+    if tool == "vector_search":
+        out["next_phase"] = "search"
+    elif tool in ("text_to_sql", "knowledge_bank"):
+        out["next_phase"] = "answer"
+    else:
+        out["next_phase"] = "answer"
+    out["status"] = "processing"
+    out["answer"] = None
+    out["answer_text"] = None
+    out["router_decision"] = router_info
+    
+    # Override timing_ms with router-specific timing from metadata.
+    # Prefer the explicit router timing, but fall back to alternate fields when needed.
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    timings_ms = metadata.get("timings_ms") if isinstance(metadata.get("timings_ms"), dict) else {}
+    router_timing = timings_ms.get("router")
+    if router_timing is None:
+        router_timing = metadata.get("router_timing_ms")
+    if router_timing is None:
+        router_timing = data.get("router_timing_ms")
+    if router_timing is not None:
+        out["timing_ms"] = router_timing
+    
+    return out
+
+
 def _normalize_vector_search_result(data: dict, request_id: str) -> dict | None:
     vector_search = data.get("vector_search") if isinstance(data.get("vector_search"), dict) else None
     raw_status = data.get("status")
@@ -220,49 +293,125 @@ def result(
     """
     Result API: Fetch answer by request_id.
     Optional long-polling:
+    - phase=router: return routing decision state (text: after router, voice: after transcription + router)
     - phase=search: return vector-search completion state
     - phase=answer: return the final synthesized answer
     - wait_seconds: 0-55, or omit for auto (text: 8s, voice: 25s)
     - poll_interval_ms: 100-2000, or omit for auto (text: 300ms, voice: 500ms)
     """
-    request_id = (request_id or "").strip()
-    phase = (phase or "answer").strip().lower()
-    if not request_id:
-        return _empty_result(request_id, error="Missing request_id")
+    try:
+        request_id = (request_id or "").strip()
+        phase = (phase or "answer").strip().lower()
+        if not request_id:
+            return _empty_result(request_id, error="Missing request_id")
 
-    cached = frappe.cache().get(request_id)
-    data, error = _safe_load_cache_payload(cached)
-    if error:
-        return _empty_result(request_id, error=f"No such request_id or unavailable state: {request_id}")
+        # Read cache and log payload for diagnostics
+        try:
+            cached = frappe.cache().get(request_id)
+        except Exception as e:
+            print(f"[result] Cache read error for {request_id}: {e}")
+            return _empty_result(request_id, error=f"Cache read error for {request_id}: {e}")
 
-    if phase == "search":
+        print(f"[result] cache_lookup: request_id={request_id} cached_type={type(cached).__name__} ts={int(time.time())}")
+        data, error = _safe_load_cache_payload(cached)
+        if error:
+            print(f"[result] cache payload invalid or missing for {request_id}: {error}")
+            return _empty_result(request_id, error=f"No such request_id or unavailable state: {request_id}")
+
+        if phase == "router":
+            is_voice = _is_voice_response(data, request_id)
+            wait_seconds = _resolve_wait_seconds(wait_seconds, is_voice=is_voice)
+            poll_interval_ms = _resolve_poll_interval_ms(poll_interval_ms, is_voice=is_voice)
+
+            if wait_seconds == 0:
+                router_out = _normalize_router_result(data, request_id)
+                if router_out:
+                    return router_out
+                out = _normalize_result(data, request_id)
+                out["phase"] = "router"
+                out["phase_complete"] = False
+                out["next_phase"] = "search" if data.get("tool") == "vector_search" else "answer"
+                return out
+
+            deadline = time.monotonic() + wait_seconds
+
+            while True:
+                router_out = _normalize_router_result(data, request_id)
+                if router_out:
+                    return router_out
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    out = _normalize_result(data, request_id)
+                    out["phase"] = "router"
+                    out["phase_complete"] = False
+                    out["next_phase"] = "search" if data.get("tool") == "vector_search" else "answer"
+                    return out
+
+                time.sleep(min(poll_interval_ms / 1000.0, remaining))
+
+                cached = frappe.cache().get(request_id)
+                data, error = _safe_load_cache_payload(cached)
+                if error:
+                    return _empty_result(request_id, error=f"No such request_id or unavailable state: {request_id}")
+
+        if phase == "search":
+            is_voice = _is_voice_response(data, request_id)
+            wait_seconds = _resolve_wait_seconds(wait_seconds, is_voice=is_voice)
+            poll_interval_ms = _resolve_poll_interval_ms(poll_interval_ms, is_voice=is_voice)
+
+            if wait_seconds == 0:
+                search_out = _normalize_vector_search_result(data, request_id)
+                if search_out:
+                    return search_out
+                out = _normalize_result(data, request_id)
+                out["phase"] = "search"
+                out["phase_complete"] = False
+                out["next_phase"] = "answer"
+                return out
+
+            deadline = time.monotonic() + wait_seconds
+
+            while True:
+                search_out = _normalize_vector_search_result(data, request_id)
+                if search_out:
+                    return search_out
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    out = _normalize_result(data, request_id)
+                    out["phase"] = "search"
+                    out["phase_complete"] = False
+                    out["next_phase"] = "answer"
+                    return out
+
+                time.sleep(min(poll_interval_ms / 1000.0, remaining))
+
+                cached = frappe.cache().get(request_id)
+                data, error = _safe_load_cache_payload(cached)
+                if error:
+                    return _empty_result(request_id, error=f"No such request_id or unavailable state: {request_id}")
+
+        out = _normalize_result(data, request_id)
+
+        if data.get("status") == "vector_search_failed":
+            return _empty_result(request_id, status="failed", error=data.get("error") or "Vector search failed")
+
+        if out.get("status") != "processing":
+            return out
+
         is_voice = _is_voice_response(data, request_id)
         wait_seconds = _resolve_wait_seconds(wait_seconds, is_voice=is_voice)
         poll_interval_ms = _resolve_poll_interval_ms(poll_interval_ms, is_voice=is_voice)
 
         if wait_seconds == 0:
-            search_out = _normalize_vector_search_result(data, request_id)
-            if search_out:
-                return search_out
-            out = _normalize_result(data, request_id)
-            out["phase"] = "search"
-            out["phase_complete"] = False
-            out["next_phase"] = "answer"
             return out
 
         deadline = time.monotonic() + wait_seconds
 
         while True:
-            search_out = _normalize_vector_search_result(data, request_id)
-            if search_out:
-                return search_out
-
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                out = _normalize_result(data, request_id)
-                out["phase"] = "search"
-                out["phase_complete"] = False
-                out["next_phase"] = "answer"
                 return out
 
             time.sleep(min(poll_interval_ms / 1000.0, remaining))
@@ -272,35 +421,8 @@ def result(
             if error:
                 return _empty_result(request_id, error=f"No such request_id or unavailable state: {request_id}")
 
-    out = _normalize_result(data, request_id)
-
-    if data.get("status") == "vector_search_failed":
-        return _empty_result(request_id, status="failed", error=data.get("error") or "Vector search failed")
-
-    if out.get("status") != "processing":
-        return out
-
-    is_voice = _is_voice_response(data, request_id)
-    wait_seconds = _resolve_wait_seconds(wait_seconds, is_voice=is_voice)
-    poll_interval_ms = _resolve_poll_interval_ms(poll_interval_ms, is_voice=is_voice)
-
-    if wait_seconds == 0:
-        return out
-
-    deadline = time.monotonic() + wait_seconds
-
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return out
-
-        time.sleep(min(poll_interval_ms / 1000.0, remaining))
-
-        cached = frappe.cache().get(request_id)
-        data, error = _safe_load_cache_payload(cached)
-        if error:
-            return _empty_result(request_id, error=f"No such request_id or unavailable state: {request_id}")
-
-        out = _normalize_result(data, request_id)
-        if out.get("status") != "processing":
-            return out
+            out = _normalize_result(data, request_id)
+            if out.get("status") != "processing":
+                return out
+    finally:
+        _close_http_connection()

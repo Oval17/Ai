@@ -22,6 +22,13 @@ from tap_ai.utils.remote_db import execute_remote_query
 #  OPTIMIZATION: Embedding caching (Phase 1)
 EMBEDDING_CACHE_TTL = 86400  # 24 hours
 
+_PINECONE_CLIENT = None
+_PINECONE_INDEX = None
+_PINECONE_INDEX_NAME = None
+_EMBEDDINGS = None
+_EMBEDDINGS_MODEL = None
+_EXECUTOR = ThreadPoolExecutor(max_workers=8)
+
 
 def _embedding_max_tokens_per_request() -> int:
     """Safety budget below provider hard limit to avoid 400 max_tokens_per_request."""
@@ -153,22 +160,34 @@ def embed_documents_cached(
 # -------------------------------------------------------------------
 
 def _pc() -> Pinecone:
+    global _PINECONE_CLIENT
+    if _PINECONE_CLIENT is not None:
+        return _PINECONE_CLIENT
+
     api_key = get_config("pinecone_api_key")
     if not api_key:
         raise RuntimeError("Missing pinecone_api_key in site_config.json")
-    return Pinecone(api_key=api_key)
+    _PINECONE_CLIENT = Pinecone(api_key=api_key)
+    return _PINECONE_CLIENT
 
 def _index():
-    pc = _pc()
+    global _PINECONE_INDEX, _PINECONE_INDEX_NAME
     name = get_config("pinecone_index") or "tap-ai-byo"
-    return pc.Index(name)
+    if _PINECONE_INDEX is None or _PINECONE_INDEX_NAME != name:
+        _PINECONE_INDEX = _pc().Index(name)
+        _PINECONE_INDEX_NAME = name
+    return _PINECONE_INDEX
 
 def _emb() -> OpenAIEmbeddings:
+    global _EMBEDDINGS, _EMBEDDINGS_MODEL
     api_key = get_config("openai_api_key")
     model = get_config("embedding_model") or "text-embedding-3-small"
     if not api_key:
         raise RuntimeError("Missing openai_api_key in site_config.json")
-    return OpenAIEmbeddings(model=model, api_key=api_key)
+    if _EMBEDDINGS is None or _EMBEDDINGS_MODEL != model:
+        _EMBEDDINGS = OpenAIEmbeddings(model=model, api_key=api_key)
+        _EMBEDDINGS_MODEL = model
+    return _EMBEDDINGS
 
 
 # -------------------------------------------------------------------
@@ -186,9 +205,20 @@ def _to_plain(v: Any) -> Any:
         return v.isoformat()
     return str(v)
 
-def _record_to_text(doctype: str, row: Dict[str, Any]) -> str:
+def _record_to_text(
+    doctype: str,
+    row: Dict[str, Any],
+    meta_cache: Optional[Dict[str, Any]] = None,
+) -> str:
     parts = []
-    meta = frappe.get_meta(doctype)
+    meta = None
+    if meta_cache is not None:
+        meta = meta_cache.get(doctype)
+        if meta is None:
+            meta = frappe.get_meta(doctype)
+            meta_cache[doctype] = meta
+    else:
+        meta = frappe.get_meta(doctype)
 
     title_field = meta.title_field
     if title_field and row.get(title_field):
@@ -270,6 +300,7 @@ def upsert_doctype(
     table = f'tab{doctype}'  
   
     buffer_texts, buffer_ids, buffer_meta = [], [], []
+    meta_cache: Dict[str, Any] = {}
 
     def flush():
         nonlocal total_vectors
@@ -310,7 +341,9 @@ def upsert_doctype(
 
             if len(group) >= group_records:
                 record_ids = [str(r["name"]) for r in group]
-                text = "\n\n---\n\n".join(_record_to_text(doctype, r) for r in group)
+                text = "\n\n---\n\n".join(
+                    _record_to_text(doctype, r, meta_cache=meta_cache) for r in group
+                )
 
                 meta = {
                     "doctype": doctype,
@@ -334,7 +367,9 @@ def upsert_doctype(
 
         if group:
             record_ids = [str(r["name"]) for r in group]
-            text = "\n\n---\n\n".join(_record_to_text(doctype, r) for r in group)
+            text = "\n\n---\n\n".join(
+                _record_to_text(doctype, r, meta_cache=meta_cache) for r in group
+            )
             
             # Ensure ID is strictly ASCII for Pinecone
             raw_id = f"{doctype}:{record_ids[0]}"
@@ -346,7 +381,7 @@ def upsert_doctype(
                 "doctype": doctype,
                 "record_ids": record_ids,
                 "count": len(group),
-                "context_preview": text[:1200],
+                "context_preview": text[:25000],
             })
 
         flush()
@@ -395,13 +430,14 @@ def search_auto_namespaces(
     use_parallel: bool = True,
 ) -> Dict[str, Any]:  
     """
-     OPTIMIZATION: Parallel Pinecone queries (Phase 2)
+     OPTIMIZATION: Parallel Pinecone queries with LLM-routed doctypes (Phase 2)
+    LLM routing is cached (5min TTL), reducing redundant calls.
     Instead of: 4 doctypes = 4 sequential queries (800ms)
-    Now does: 4 doctypes = 1 parallel batch (200ms)
+    Now does: 4 routed doctypes in 1 parallel batch (200ms)
     """
     idx = _index()  
   
-    # 1. Route doctypes using LLM  
+    # 1. Route doctypes using LLM (cached; only one LLM call on cache miss)
     doctypes = pick_doctypes(q, top_n=route_top_n) or []  
   
     # 2. Enforce exclusion list  
@@ -449,6 +485,7 @@ def search_auto_namespaces(
                     filter=filters,
                     include_metadata=True,
                     include_values=False,
+                    timeout=3.0,
                 )
                 matches = []
                 for m in res.get("matches", []):
@@ -464,10 +501,9 @@ def search_auto_namespaces(
                 return []
         
         # Parallel execution
-        with ThreadPoolExecutor(max_workers=min(4, len(doctypes))) as executor:
-            results = executor.map(query_namespace, doctypes)
-            for matches in results:
-                all_matches.extend(matches)
+        results = _EXECUTOR.map(query_namespace, doctypes)
+        for matches in results:
+            all_matches.extend(matches)
     else:
         # Sequential fallback
         for ns in doctypes:
@@ -479,6 +515,7 @@ def search_auto_namespaces(
                     filter=filters,
                     include_metadata=True,
                     include_values=False,
+                    timeout=3.0,
                 )
 
                 for m in res.get("matches", []):

@@ -6,73 +6,117 @@ Provides connection management and query execution for the remote PostgreSQL dat
 Used by SQL answerer and RAG answerer for data fetching.
 """
 
+import os
+import threading
+
 import psycopg2
+from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 from typing import List, Dict, Any, Optional
 import frappe
 
+_POOL = None
+_POOL_PID = None
+_POOL_LOCK = threading.Lock()
 
-class RemoteDBConnection:
-    """Singleton connection manager for remote PostgreSQL database"""
 
-    _instance = None
-    _connection = None
+class _PooledConnectionHandle:
+    def __init__(self, db_pool: pool.ThreadedConnectionPool, conn):
+        self._pool = db_pool
+        self._conn = conn
+        self._returned = False
 
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+    def __getattr__(self, item):
+        return getattr(self._conn, item)
 
-    def get_connection(self):
-        """Get or create database connection"""
-        if self._connection is None or self._connection.closed:
-            self._connection = self._create_connection()
-        return self._connection
-
-    def _create_connection(self):
-        """Create new database connection"""
-        try:
-            host = frappe.conf.get("remote_db_host", "127.0.0.1")
-            port = frappe.conf.get("remote_db_port", 5433)
-            db_name = frappe.conf.get("remote_db_name")
-            user = frappe.conf.get("remote_db_user")
-            password = frappe.conf.get("remote_db_password")
-
-            if not all([host, port, db_name, user, password]):
-                raise ValueError("Missing remote database configuration")
-
-            conn = psycopg2.connect(
-                host=host,
-                port=port,
-                dbname=db_name,
-                user=user,
-                password=password
-            )
-            print("✅ Remote database connection established")
-            return conn
-
-        except Exception as e:
-            # Handle case where frappe.log_error might not be available
+    def _return(self) -> None:
+        if not self._returned:
             try:
-                frappe.log_error(f"Remote database connection failed: {e}")
-            except AttributeError:
-                print(f"Remote database connection failed: {e}")
-            raise
+                self._pool.putconn(self._conn)
+            finally:
+                self._returned = True
 
-    def close(self):
-        """Close database connection"""
-        if self._connection and not self._connection.closed:
-            self._connection.close()
-            self._connection = None
+    def close(self) -> None:
+        self._return()
+
+    def __enter__(self):
+        return self._conn
+
+    def __exit__(self, exc_type, exc, tb):
+        self._return()
 
 
-# Global connection instance
-_remote_db = RemoteDBConnection()
+def _get_connection_config() -> Dict[str, Any]:
+    host = frappe.conf.get("remote_db_host", "127.0.0.1")
+    port = frappe.conf.get("remote_db_port", 5433)
+    db_name = frappe.conf.get("remote_db_name")
+    user = frappe.conf.get("remote_db_user")
+    password = frappe.conf.get("remote_db_password")
+
+    if not all([host, port, db_name, user, password]):
+        raise ValueError("Missing remote database configuration")
+
+    return {
+        "host": host,
+        "port": port,
+        "dbname": db_name,
+        "user": user,
+        "password": password,
+    }
+
+
+def _close_pool() -> None:
+    global _POOL
+    if _POOL is not None:
+        try:
+            _POOL.closeall()
+        except Exception:
+            pass
+        _POOL = None
+
+
+def _create_pool() -> pool.ThreadedConnectionPool:
+    cfg = _get_connection_config()
+    minconn = int(frappe.conf.get("remote_db_pool_min", 2) or 2)
+    maxconn = int(frappe.conf.get("remote_db_pool_max", 10) or 10)
+    if minconn < 1:
+        minconn = 1
+    if maxconn < minconn:
+        maxconn = minconn
+
+    return pool.ThreadedConnectionPool(minconn=minconn, maxconn=maxconn, **cfg)
+
+
+def _get_pool() -> pool.ThreadedConnectionPool:
+    global _POOL, _POOL_PID
+
+    pid = os.getpid()
+    if _POOL is not None and _POOL_PID != pid:
+        _close_pool()
+        _POOL_PID = None
+
+    if _POOL is None:
+        with _POOL_LOCK:
+            if _POOL is None:
+                try:
+                    _POOL = _create_pool()
+                    _POOL_PID = pid
+                    print("✅ Remote database connection pool established")
+                except Exception as e:
+                    try:
+                        frappe.log_error(f"Remote database pool creation failed: {e}")
+                    except AttributeError:
+                        print(f"Remote database pool creation failed: {e}")
+                    raise
+
+    return _POOL
 
 
 def get_remote_connection():
-    """Get remote database connection"""
-    return _remote_db.get_connection()
+    """Get a pooled remote DB connection handle (supports direct use and with-context)."""
+    db_pool = _get_pool()
+    conn = db_pool.getconn()
+    return _PooledConnectionHandle(db_pool, conn)
 
 
 def execute_remote_query(sql: str, params: Optional[tuple] = None) -> List[Dict[str, Any]]:
@@ -86,17 +130,18 @@ def execute_remote_query(sql: str, params: Optional[tuple] = None) -> List[Dict[
     Returns:
         List of result dictionaries
     """
+    conn = None
+    db_pool = None
     try:
-        conn = get_remote_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        db_pool = _get_pool()
+        conn = db_pool.getconn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            if params is None or len(params) == 0:
+                cursor.execute(sql)
+            else:
+                cursor.execute(sql, params)
+            results = cursor.fetchall()
 
-        if params is None or len(params) == 0:
-            cursor.execute(sql)
-        else:
-            cursor.execute(sql, params)
-        results = cursor.fetchall()
-
-        cursor.close()
         return [dict(row) for row in results]
 
     except Exception as e:
@@ -106,6 +151,12 @@ def execute_remote_query(sql: str, params: Optional[tuple] = None) -> List[Dict[
         except AttributeError:
             print(f"Remote query execution failed: {e}\nSQL: {sql}")
         raise Exception(f"Remote database query failed: {str(e)}")
+    finally:
+        if db_pool is not None and conn is not None:
+            try:
+                db_pool.putconn(conn)
+            except Exception:
+                pass
 
 
 def get_remote_all(doctype: str, fields: List[str] = None, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
@@ -184,5 +235,6 @@ def get_remote_table_columns(table: str) -> List[str]:
 
 
 def close_remote_connection():
-    """Close remote database connection"""
-    _remote_db.close()
+    """Close all pooled remote database connections"""
+    with _POOL_LOCK:
+        _close_pool()

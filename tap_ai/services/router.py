@@ -112,7 +112,10 @@ Return ONLY JSON:
 """
 
 FAST_SQL_PATTERNS = re.compile(r"\b(list|count|how many|show me all|filter)\b", re.I)
-FAST_KB_PATTERNS = re.compile(r"^(hi|hello|who are you|thanks|thank you|bye)\b", re.I)
+FAST_KB_PATTERNS = re.compile(
+    r"^(?:h(?:i+|e+y+)|hello+|good\s*(?:morning|afternoon|evening)|namaste|who\s+are\s+you|thanks?|thank\s+you|bye+)\b",
+    re.I,
+)
 
 
 def _fast_route(query: str) -> Optional[str]:
@@ -447,12 +450,31 @@ def _get_history_from_cache(
 ) -> List[Dict[str, str]]:
     try:
         key = _cache_key(user_id, session_id)
-        raw = frappe.cache().get(key)
+        cache = frappe.cache()
+
+        # Preferred path: Redis list avoids read-modify-write races.
+        if all(hasattr(cache, method) for method in ("lrange",)):
+            rows = cache.lrange(key, 0, -1) or []
+            history = []
+            for row in rows:
+                if isinstance(row, bytes):
+                    row = row.decode("utf-8", errors="ignore")
+                try:
+                    item = json.loads(row)
+                    if isinstance(item, dict):
+                        history.append(item)
+                except Exception:
+                    continue
+            if history:
+                return history[-10:]
+
+        # Legacy fallback: JSON blob under same key.
+        raw = cache.get(key)
         if isinstance(raw, bytes):
-            raw = raw.decode()
+            raw = raw.decode("utf-8", errors="ignore")
         history = json.loads(raw) if raw else []
-        if history:
-            return history
+        if isinstance(history, list) and history:
+            return history[-10:]
 
         # Fallback: hydrate live cache from durable DB history
         return _get_history_from_db(user_id, session_id=session_id, limit=10)
@@ -463,12 +485,27 @@ def _get_history_from_cache(
 
 def _save_history_to_cache(
     user_id: str,
-    history: List[Dict[str, str]],
+    messages: List[Dict[str, str]],
     session_id: Optional[str] = None
 ):
     try:
+        if not messages:
+            return
+
         key = _cache_key(user_id, session_id)
-        frappe.cache().set(key, json.dumps(history[-10:]))
+        cache = frappe.cache()
+
+        # Preferred path: append-only list operations are safer under concurrency.
+        if all(hasattr(cache, method) for method in ("rpush", "ltrim")):
+            for message in messages:
+                cache.rpush(key, json.dumps(message))
+            cache.ltrim(key, -10, -1)
+            return
+
+        # Fallback for cache backends without list operations.
+        existing = _get_history_from_cache(user_id, session_id=session_id)
+        merged = (existing + messages)[-10:]
+        cache.set(key, json.dumps(merged))
     except Exception as e:
         print(f"> History save failed: {e}")
 
@@ -572,9 +609,12 @@ def cli(q: str, user_id: str = "default_user"):
         print("\n--- INTERIM MESSAGE ---")
         print(out["interim_message"])
 
-    history.append({"role": "user", "content": q})
-    history.append({"role": "assistant", "content": out.get("answer", "")})
-    _save_history_to_cache(user_id, history)
+    new_messages = [
+        {"role": "user", "content": q},
+        {"role": "assistant", "content": out.get("answer", "")},
+    ]
+    history.extend(new_messages)
+    _save_history_to_cache(user_id, new_messages)
 
     print("\n--- RESULT ---")
     print(json.dumps(out, indent=2, ensure_ascii=False))

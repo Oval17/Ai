@@ -489,12 +489,15 @@ def query_endpoint(**kwargs):
         )  
           
         # Update and persist chat history  
-        history.append({"role": "user", "content": query})  
-        history.append({"role": "assistant", "content": result.get("answer", "")})  
-        _save_history_to_cache(user_profile['name'], history, session_id=session_id)  
+        new_messages = [
+            {"role": "user", "content": query},
+            {"role": "assistant", "content": result.get("answer", "")},
+        ]
+        history.extend(new_messages)
+        _save_history_to_cache(user_profile['name'], new_messages, session_id=session_id)  
         _append_history_to_db(  
             user_profile['name'],  
-            [{"role": "user", "content": query}, {"role": "assistant", "content": result.get("answer", "")}],  
+            new_messages,
             session_id=session_id,  
             metadata={"source": "api"}  
         )  

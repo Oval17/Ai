@@ -245,7 +245,7 @@ def _context_fields_for_doctype(doctype: str) -> List[str]:
             seen.add(f)
             final_fields.append(f)
 
-    frappe.cache().set(cache_key, json.dumps(final_fields), ex=86400)
+    frappe.cache().set(cache_key, json.dumps(final_fields), ex=3600)
     return final_fields
 
 

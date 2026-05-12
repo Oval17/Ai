@@ -185,12 +185,15 @@ def _process_vector_search_synthesis(payload: dict) -> None:
     answer = out.get("answer", "")
     metadata = out.get("metadata", {}) or {}
 
-    chat_history.append({"role": "user", "content": query})
-    chat_history.append({"role": "assistant", "content": answer})
-    _save_history_to_cache(user_id, chat_history, session_id=session_id)
+    new_messages = [
+        {"role": "user", "content": query},
+        {"role": "assistant", "content": answer},
+    ]
+    chat_history.extend(new_messages)
+    _save_history_to_cache(user_id, new_messages, session_id=session_id)
     _append_history_to_db(
         user_id,
-        [{"role": "user", "content": query}, {"role": "assistant", "content": answer}],
+        new_messages,
         session_id=session_id,
         metadata={"source": "llm_worker", "stage": "vector_search_synthesis"},
     )
@@ -343,12 +346,15 @@ def process_message(ch, method, properties, body):
         resolved_tool = _resolve_result_tool(out, primary_tool)
 
         # 5. Update and save history
-        chat_history.append({"role": "user", "content": query})
-        chat_history.append({"role": "assistant", "content": answer})
-        _save_history_to_cache(user_id, chat_history, session_id=session_id)
+        new_messages = [
+            {"role": "user", "content": query},
+            {"role": "assistant", "content": answer},
+        ]
+        chat_history.extend(new_messages)
+        _save_history_to_cache(user_id, new_messages, session_id=session_id)
         _append_history_to_db(
             user_id,
-            [{"role": "user", "content": query}, {"role": "assistant", "content": answer}],
+            new_messages,
             session_id=session_id,
             metadata={"source": "llm_worker"},
         )

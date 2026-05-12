@@ -254,17 +254,44 @@ def get_db_columns_for_doctype(doctype: str) -> List[str]:
 # -------------------------------------------------------------------
 
 def _get_excluded_doctypes() -> set[str]:
+    cache_key = "tap_ai:excluded_doctypes"
+    try:
+        cached = frappe.cache().get(cache_key)
+        if cached:
+            if isinstance(cached, bytes):
+                cached = cached.decode("utf-8", errors="ignore")
+            try:
+                items = json.loads(cached)
+                return set(items)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     excluded = set()
     try:
         recs = frappe.get_all("ExcludedDoctypes", fields=["name"], limit=1)
         if not recs:
+            # cache empty set briefly to avoid DB thundering
+            try:
+                frappe.cache().set(cache_key, json.dumps([]), ex=60)
+            except Exception:
+                pass
             return excluded
+
         doc = frappe.get_doc("ExcludedDoctypes", recs[0].name)
         for row in doc.excluded_doctype:
             if row.doctype_name:
                 excluded.add(row.doctype_name)
+
+        try:
+            frappe.cache().set(cache_key, json.dumps(list(excluded)), ex=60)
+        except Exception:
+            pass
+
     except Exception:
         pass
+
     return excluded
 
 def _filter_excluded(doctypes: List[str]) -> List[str]:

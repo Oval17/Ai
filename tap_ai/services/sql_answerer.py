@@ -152,12 +152,12 @@ def _generate_sql_query(
     Returns:  
         Generated SQL query string  
     """  
-    llm = _llm()  
-
     try:
         persona = get_system_message_for_context(user_profile=user_profile)
     except Exception:
         persona = ""
+
+    from tap_ai.services.router import llm_invoke_cached
       
     # Build user prompt with context hints  
     user_prompt_parts = [  
@@ -200,8 +200,12 @@ def _generate_sql_query(
             messages.append(("system", persona))
         messages.append(("user", user_prompt))
 
-        resp = llm.invoke(messages)  
-        sql = getattr(resp, "content", "").strip()  
+        sql = llm_invoke_cached(
+            messages,
+            model=get_config("primary_llm_model") or "gpt-4o-mini",
+            temperature=0.0,
+            max_tokens=800,
+        ).strip()
           
         # Clean up the SQL  
         sql = sql.replace("```sql", "").replace("```", "").strip()  
@@ -271,7 +275,7 @@ def _synthesize_answer_from_results(
     Returns:
         Natural language answer
     """
-    llm = _llm(temperature=0.2)
+    from tap_ai.services.router import llm_invoke_cached
     
     # Build system prompt with optional personalization
     if user_profile and user_profile.get('name'):
@@ -324,11 +328,17 @@ RESULTS ({len(results)} total):
 Provide a helpful answer based on these results."""
     
     try:
-        resp = llm.invoke([
-            ("system", system_prompt),
-            ("user", user_prompt)
-        ])
-        answer = getattr(resp, "content", "I couldn't generate an answer.").strip()
+        answer = llm_invoke_cached(
+            [
+                ("system", system_prompt),
+                ("user", user_prompt),
+            ],
+            model=get_config("primary_llm_model") or "gpt-4o-mini",
+            temperature=0.2,
+            max_tokens=800,
+        ).strip()
+        if not answer:
+            answer = "I couldn't generate an answer."
         
         # Add personalized greeting if user profile available
         if user_profile and user_profile.get('name') and not answer.startswith("Hi"):

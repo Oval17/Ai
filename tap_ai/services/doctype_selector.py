@@ -106,7 +106,7 @@ def _get_cached_result(cache_key: str) -> Optional[List[str]]:
 def _cache_result(cache_key: str, result: List[str]) -> None:  
     """Cache doctype selection result"""  
     try:  
-        frappe.cache().set(cache_key, json.dumps(result), expire_in_seconds=CACHE_TTL)  
+        frappe.cache().set(cache_key, json.dumps(result), ex=CACHE_TTL)  
     except Exception:  
         pass  
 

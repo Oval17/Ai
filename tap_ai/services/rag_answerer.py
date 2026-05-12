@@ -160,9 +160,20 @@ def _build_metadata_filter(
 # CONTEXT BUILDING (RESTORED FROM EARLIER VERSION)
 # ======================================================
 
-def _record_to_text(doctype: str, row: Dict[str, Any]) -> str:
+def _record_to_text(
+    doctype: str,
+    row: Dict[str, Any],
+    meta_cache: Optional[Dict[str, Any]] = None,
+) -> str:
     parts = []
-    meta = frappe.get_meta(doctype)
+    meta = None
+    if meta_cache is not None:
+        meta = meta_cache.get(doctype)
+        if meta is None:
+            meta = frappe.get_meta(doctype)
+            meta_cache[doctype] = meta
+    else:
+        meta = frappe.get_meta(doctype)
 
     title_field = meta.title_field
     if title_field and row.get(title_field):
@@ -252,6 +263,7 @@ def _build_context_from_hits(
     used_chars = 0
     metadata_hits_used = 0
     db_queries = 0
+    meta_cache: Dict[str, Any] = {}
 
     # Hydrate context only for top-N hits; deeper hits are often low signal.
     top_hits = (hits or [])[: _max_context_hits()]
@@ -339,7 +351,7 @@ def _build_context_from_hits(
                         continue
                     
                     row = rows_dict[record_id]
-                    chunk = _record_to_text(doctype, row)
+                    chunk = _record_to_text(doctype, row, meta_cache=meta_cache)
                     
                     if used_chars + len(chunk) > max_chars:
                         break

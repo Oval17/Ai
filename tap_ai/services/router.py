@@ -14,6 +14,7 @@ import json
 import time
 import hashlib
 import uuid
+import re
 from typing import Dict, Any, List, Optional
 
 import frappe
@@ -110,8 +111,29 @@ Return ONLY JSON:
 }
 """
 
+FAST_SQL_PATTERNS = re.compile(r"\b(list|count|how many|show me all|filter)\b", re.I)
+FAST_KB_PATTERNS = re.compile(r"^(hi|hello|who are you|thanks|thank you|bye)\b", re.I)
+
+
+def _fast_route(query: str) -> Optional[str]:
+    q = (query or "").strip()
+    if not q:
+        return None
+
+    if FAST_KB_PATTERNS.match(q):
+        return "knowledge_bank"
+
+    if FAST_SQL_PATTERNS.search(q):
+        return "text_to_sql"
+
+    return None
+
 
 def choose_tool(query: str, user_context: Optional[str] = None) -> str:
+    fast_tool = _fast_route(query)
+    if fast_tool:
+        return fast_tool
+
     prompt = f"USER QUESTION:\n{query}"
     if user_context:
         prompt = f"USER CONTEXT:\n{user_context}\n\n{prompt}"
@@ -324,6 +346,7 @@ def process_query(
 # ======================================================
 
 CHAT_HISTORY_TABLE = get_config("chat_history_db_table") or "tabAIChatHistory"
+_CHAT_HISTORY_TABLE_ENSURED = False
 
 
 def _cache_key(user_id: str, session_id: Optional[str] = None) -> str:
@@ -331,7 +354,12 @@ def _cache_key(user_id: str, session_id: Optional[str] = None) -> str:
 
 
 def _ensure_chat_history_table_exists():
+    global _CHAT_HISTORY_TABLE_ENSURED
+
     if not get_config("enable_db_history"):
+        return
+
+    if _CHAT_HISTORY_TABLE_ENSURED:
         return
 
     try:
@@ -349,6 +377,7 @@ def _ensure_chat_history_table_exists():
             """
         )
         frappe.db.commit()
+        _CHAT_HISTORY_TABLE_ENSURED = True
     except Exception as e:
         frappe.log_error(f"Chat history table creation failed: {e}", "tap_ai.services.router")
 
